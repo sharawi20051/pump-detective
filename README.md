@@ -57,6 +57,21 @@ Optional AI explanations need an OpenAI API key, set as `OPENAI_API_KEY` or past
 5. **Physics-based limits.** The NPSH thresholds become allowable strainer Δp values: allowable Δp = pressure before the strainer − suction pressure needed for NPSHr (+ the engineer margin), at design flow. A maintenance Δp limit (illustrative 20 kPa) is also shown.
 6. **Recommendation.** The app gives the date by which to clean the strainer, the threshold that drives it, and whether cleaning alone can restore the margin.
 
+## Maintenance verification
+
+After cleaning, the **Verify the maintenance** form in the Fouling forecast tab takes one strainer Δp reading and the flow at that moment (`verification.py`, unit tested):
+
+- **Flow normalisation:** Δp* = Δp·(Q_ref/Q)². A reading taken at low flow cannot pass as clean.
+- **Uncertainty:** an expanded uncertainty at k = 2 is built from instrument datasheet accuracies, treated as rectangular limits (GUM), for either two absolute transmitters or one DP transmitter. An optional baseline repeatability term can be added.
+- **Verdicts:**
+  - RESTORED (within the clean band);
+  - IMPROVED, NOT CLEAN;
+  - NOT EFFECTIVE (still at or above the maintenance limit);
+  - SUSPICIOUSLY LOW (possible torn screen, bypass or sensor fault).
+- **NPSH:** the outcome at design flow is reported separately. The app notes when suction is still below atmospheric pressure.
+
+The default instrument figures and the 5 kPa baseline are example values, not field data. The verdict also feeds Detective Intelligence and the work order. `docs/MOMEN_PLAN.md` describes the planned Momen technician app that will supply these readings.
+
 ## AI maintenance recommendation
 
 Detective Intelligence defaults to the **Fouling forecast** snapshot. The forecast is packaged as structured data: current Δp*, fouling rate and range, NPSH status, time to each threshold, detected events, and a rule-based recommendation with priority (URGENT = now, HIGH = within 14 days, PLANNED = later, NONE). The rules also turn that into ranked findings.

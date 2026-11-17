@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 import forecast as fc
+import verification as vf
 
 from pump_detective import (
     ATMOSPHERIC_KPA_ABS, CLEAN_FILTER_DROP_KPA, DESIGN_FLOW_LPS, NORMAL_SUCTION_KPA_ABS,
@@ -286,6 +287,13 @@ def forecast_findings(summary):
         add(2, f"{len(glitches)} suspect sensor reading(s) excluded",
             "; ".join(f"{e['date']}: {e['evidence']}" for e in glitches),
             "Check the suction pressure transmitter, impulse line and wiring.")
+    ver = summary.get("post_maintenance_verification")
+    if ver:
+        priority = {"RESTORED": 3, "IMPROVED, NOT CLEAN": 2}.get(ver["strainer_verdict"], 0)
+        add(priority, f"Maintenance check · strainer {ver['strainer_verdict']}",
+            f"{ver['message']} Measured {ver['measured_dp_kpa']:g} kPa at {ver['measured_flow_lps']:g} L/s "
+            f"({ver['instrument_method']}). NPSH after cleaning: {ver['npsh_status_after']}.",
+            ver["next_check"] + " The forecast dates above were fitted to pre-cleaning data; restart the trend from this reading.")
     add(3, "Forecast basis",
         f"{summary['data_origin']}; trend fitted on {summary['trend_fit_days']} daily medians from "
         f"{summary['trend_fit_start']}. {summary['uncertainty_note']}",
@@ -349,6 +357,19 @@ def offline_work_order(snapshot):
     elif reco["priority"] != "NONE":
         lines.extend(["", "Before / after:",
                       "- Before cleaning: record Δp and flow. After cleaning: confirm Δp* returns near the clean reference, then re-run the forecast."])
+    ver = forecast.get("post_maintenance_verification")
+    if ver:
+        lines.extend([
+            "", "Verification (post-maintenance reading):",
+            f"- Strainer: {ver['strainer_verdict']}. {ver['message']}",
+            f"- Clean band {ver['clean_baseline_kpa']:.2f} ± {ver['expanded_uncertainty_k2_kpa']:.2f} kPa (k = 2, "
+            f"{ver['instrument_method'].lower()}).",
+            f"- NPSH at design flow after cleaning: {ver['npsh_status_after']}"
+            + (f" (NPSHa {ver['npsha_after_m']:.2f} m)." if ver["npsha_after_m"] is not None else "."),
+            f"- Next: {ver['next_check']}",
+        ])
+        if ver["suction_after_kpa_abs"] < ATMOSPHERIC_KPA_ABS:
+            lines.append("- Suction is still below atmospheric pressure: system pressure must also be restored.")
     lines.extend(["", f"Confidence: {forecast['data_origin']}. {forecast['uncertainty_note']}"])
     return "\n".join(lines)
 
@@ -377,6 +398,10 @@ is not enough and upstream pressure must be restored.
 For a maintenance or scheduling question, answer as a short work order with these headings:
 Action, Priority, Complete by, Why (evidence), Also check, Confidence.
 Without a forecast object, do not give maintenance dates; say a trend forecast is needed.
+If forecast.post_maintenance_verification is present, report its strainer_verdict, clean band
+and NPSH status exactly; never upgrade a verdict. RESTORED means the strainer reading is within
+the measurement uncertainty of the clean baseline, not that the pump or system is healthy.
+SUSPICIOUSLY LOW must be reported as a possible damaged screen, bypass or sensor problem.
 """
 
 
@@ -952,6 +977,108 @@ with fouling:
             "no change in water temperature. Real fouling can accelerate or stop, so the forecast must be re-run as new data arrive. "
             "This is a maintenance-planning aid, not a guarantee."
         )
+    # --- Post-maintenance verification -------------------------------------------
+    st.subheader("Verify the maintenance")
+    st.write(
+        "After cleaning, record one strainer Δp reading **and the flow at that moment**. The reading is "
+        "flow-normalised and compared with the clean baseline within the measurement uncertainty of your instruments."
+    )
+    with st.form("verify_form"):
+        v1, v2 = st.columns(2)
+        v_dp = v1.number_input("Post-cleaning strainer Δp (kPa)", min_value=0.0, value=None, step=0.1,
+                               placeholder="e.g. 5.1", key="verify_dp")
+        v_flow = v2.number_input("Flow during that reading (L/s)", min_value=0.0, value=None, step=0.1,
+                                 placeholder="e.g. 21.0", key="verify_flow")
+        v3, v4 = st.columns(2)
+        v_baseline = v3.number_input(
+            "Clean baseline Δp* at design flow (kPa)", min_value=0.1, value=CLEAN_FILTER_DROP_KPA, step=0.1,
+            key="verify_baseline",
+            help="Demo value. In the field, use the flow-normalised Δp measured after commissioning or the last good cleaning.",
+        )
+        v_repeat = v4.number_input(
+            "Baseline repeatability, 1σ (kPa)", min_value=0.0, value=0.0, step=0.05, key="verify_repeat",
+            help="Spread of past post-cleaning Δp* readings for this strainer. 0 = instrument uncertainty only.",
+        )
+        with st.expander("Instrument accuracy (from the datasheets)"):
+            v_method = st.radio("Δp measured with", (vf.TWO_ABSOLUTE, vf.DIFFERENTIAL), key="verify_method")
+            i1, i2, i3 = st.columns(3)
+            v_span = i1.number_input("Pressure span (kPa)", min_value=1.0, value=400.0, step=1.0, key="verify_span",
+                                     help="Span of each absolute transmitter, or of the DP transmitter if one is used.")
+            v_acc = i2.number_input("Pressure ± % span", min_value=0.0, value=0.1, step=0.01,
+                                    format="%.3f", key="verify_acc", help="Transmitter accuracy, ± % of span.")
+            v_qacc = i3.number_input("Flow ± % reading", min_value=0.0, value=0.5, step=0.1,
+                                     key="verify_qacc", help="Flow meter accuracy, ± % of reading.")
+            st.caption(
+                "Defaults are example datasheet figures (0–400 kPa abs transmitters at ±0.1 % of span, flow meter at "
+                "±0.5 % of reading), not measurements of a real installation. Accuracy limits are treated as rectangular "
+                "(GUM), and the result is reported at k = 2 (about 95 %). A single DP transmitter across the strainer "
+                "gives a much tighter band than subtracting two absolute transmitters."
+            )
+        v_submit = st.form_submit_button("Verify maintenance")
+    if v_submit:
+        st.session_state.pop("verification", None)
+        v_problem_msg = vf.reading_problem(
+            v_dp, v_flow, DESIGN_FLOW_LPS, pressure_before_kpa_abs=fc_upstream,
+            max_flow_lps=LOWARA_CURVE[-1][0] / 3.6,
+        )
+        if v_problem_msg:
+            st.error("Reading not accepted — " + v_problem_msg)
+        else:
+            try:
+                v_result = vf.verify_cleaning(
+                    v_dp, v_flow, DESIGN_FLOW_LPS, v_baseline, fc_maint_limit,
+                    vf.Instruments(v_method, v_span, v_acc, v_qacc),
+                    dp_star_before_kpa=fc_fit.current_kpa, baseline_repeatability_kpa=v_repeat,
+                )
+                st.session_state["verification"] = {
+                    "scenario": fc_scenario, "upstream": fc_upstream, "result": v_result,
+                    "dp_kpa": v_dp, "flow_lps": v_flow, "method": v_method,
+                }
+            except ValueError as exc:
+                # Our own validation messages only; never a raw traceback.
+                st.error("Reading not accepted — " + str(exc))
+
+    verification = st.session_state.get("verification")
+    if verification and (verification["scenario"], verification["upstream"]) != (fc_scenario, fc_upstream):
+        verification = None  # belongs to a different forecast
+    verification_summary = None
+    if verification:
+        v_res = verification["result"]
+        v_suction = fc_upstream - v_res.dp_star_kpa
+        v_problem = npsha_input_problem(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
+        v_npsha = available_npsh(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
+        v_status = "NOT ASSESSED" if v_problem else npsh_assessment(v_npsha, fc_npshr, engineer_margin)[2]
+        show = {"RESTORED": st.success, "IMPROVED, NOT CLEAN": st.warning}.get(v_res.verdict, st.error)
+        show(f"**Strainer: {v_res.verdict}** — {v_res.message}")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Δp* after cleaning", f"{v_res.dp_star_kpa:.2f} kPa",
+                  None if v_res.reduction_pct is None else f"{-v_res.reduction_pct:+.0f}% vs before",
+                  # A large drop is not good news when the reading is suspiciously low.
+                  delta_color="off" if v_res.verdict == "SUSPICIOUSLY LOW" else "inverse")
+        r2.metric(f"Clean band around {v_res.baseline_kpa:.2f} kPa", f"± {v_res.expanded_uncertainty_kpa:.2f} kPa",
+                  help="Expanded measurement uncertainty, k = 2 (about 95 %).")
+        r3.metric(f"NPSHa at design flow · {v_status}", "Not assessed" if v_problem else f"{v_npsha:.2f} m")
+        st.write(f"**Next:** {v_res.next_check}")
+        if v_suction < ATMOSPHERIC_KPA_ABS:
+            st.info(
+                f"Suction at design flow would be {v_suction:.1f} kPa abs, below atmospheric. Strainer cleaning alone "
+                "cannot fix the loop's low system pressure: check fill pressure and the expansion tank."
+            )
+        verification_summary = {
+            "strainer_verdict": v_res.verdict,
+            "measured_dp_kpa": verification["dp_kpa"], "measured_flow_lps": verification["flow_lps"],
+            "normalised_dp_after_kpa": round(v_res.dp_star_kpa, 3),
+            "clean_baseline_kpa": v_res.baseline_kpa,
+            "expanded_uncertainty_k2_kpa": round(v_res.expanded_uncertainty_kpa, 3),
+            "instrument_method": verification["method"],
+            "reduction_vs_before_pct": None if v_res.reduction_pct is None else round(v_res.reduction_pct, 1),
+            "npsha_after_m": None if v_problem else round(v_npsha, 3),
+            "npsh_status_after": v_status,
+            "suction_after_kpa_abs": round(v_suction, 2),
+            "message": v_res.message, "next_check": v_res.next_check,
+            "note": "Post-maintenance reading entered by the user; instrument accuracies are datasheet inputs.",
+        }
+
     # Structured, JSON-safe summary shared with Detective Intelligence and the AI layer.
     forecast_summary = {
         "data_origin": "SYNTHETIC sensor log generated by the app (not field data)",
@@ -976,6 +1103,7 @@ with fouling:
         "recommendation": fc_reco,
         "events": [{"date": e["When"], "type": e["Type"], "evidence": e["Evidence"]} for e in fc_events],
         "uncertainty_note": "Day ranges come from the trend fit's statistical uncertainty only; fouling can accelerate or stop.",
+        "post_maintenance_verification": verification_summary,
     }
 
     st.download_button(

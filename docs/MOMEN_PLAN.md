@@ -1,108 +1,91 @@
-# Momen integration plan: technician work-order app
+# Momen integration plan: GO SMALL
 
-Status: **planned, nothing built yet.** Momen is optional for GenHacks. The sponsor gives every participant $100 in credit (code valid Nov 1 – Dec 25; redeem link and access code are in the GenHacks Devpost update “Momen Workshop for GenHacks”) and runs a workshop with Momen's CEO on **Nov 20, 4:30–5:30 PM PST**. Using Momen gives no stated judging bonus. We use it because it adds a real step to the product.
+**Decision:** build a small closed loop. Pump Detective sends a work order → the technician completes it in Momen with a post-cleaning reading → Pump Detective reads it back and **verifies** the result.
 
-## 1. Why Momen, and what it adds
+**Status:**
+- Step 1, verification in Python, is **done**: `verification.py` plus the “Verify the maintenance” form in the Fouling forecast tab.
+- Steps 2–7 are not started.
 
-Today Pump Detective stops at a recommendation: “PLANNED · clean the strainer by 7 Dec”. Real predictive maintenance closes the loop:
+Momen is optional for GenHacks. The sponsor gives every participant $100 in credit (code valid Nov 1 – Dec 25; redeem link and access code are in the GenHacks Devpost update “Momen Workshop for GenHacks”) and runs a workshop on **Nov 20, 4:30–5:30 PM PST**. Using Momen gives no stated judging bonus.
+
+## Why, and the boundary
+
+- **Value split:** the value is in verification, which lives in Python. Momen supplies what Streamlit cannot do well: persistent shared work orders and a separate, phone-friendly technician app with its own login.
+- **Calculations stay in Python.** Momen stores and displays work orders only. All engineering stays in Pump Detective (normalisation, uncertainty, verdicts, NPSH).
+- **Pump Detective must work without Momen.** With no Momen configuration, the Send button is hidden and the manual verification form still works.
 
 ```
-Sensors (synthetic) → Physics + forecast (Python) → Work order (rules / AI)
-        ↑                                                  ↓
-   Re-run forecast  ←  Verified result  ←  Technician completes it in Momen
+Forecast → Work order ──(send)──▶ Momen: technician enters Δp + flow, taps Done
+   ▲                                              │
+   └──── Verify (flow-normalised Δp*, k=2 band, NPSH) ◀──(read back)──┘
 ```
 
-Momen becomes the **technician side**: a small app with a database of work orders. A technician opens it, sees what to do and by when, marks the job done and records the strainer Δp after cleaning. Pump Detective reads the result back and shows whether cleaning worked.
+## Minimum schema: table `work_order`
 
-**Why not rebuild Pump Detective in Momen?** The physics, the forecast and the tests are the strongest parts, and they belong in Python. Momen is used where no-code is strong: data entry, lists, status workflow and a mobile-friendly UI.
+Momen adds `id` and `created_at` itself.
 
-## 2. Architecture
-
-| Part | Built with | Job |
+| Field | Type | Written by |
 |---|---|---|
-| Pump Detective | Python / Streamlit (existing) | Forecast, findings, work-order text, **Send to Momen** button, status panel |
-| `momen_client.py` | Python stdlib `urllib` (new) | Two calls to Momen's GraphQL API: create a work order, list work orders |
-| Momen project | Momen no-code | `work_order` table, list page, detail page with “Mark done” |
+| `action` | Text | Pump Detective |
+| `priority` | Text: URGENT / HIGH / PLANNED | Pump Detective |
+| `complete_by` | Text, YYYY-MM-DD | Pump Detective |
+| `dp_star_before_kpa` | Decimal | Pump Detective |
+| `status` | Text: OPEN / DONE | Pump Detective (OPEN), technician (DONE) |
+| `dp_after_kpa` | Decimal | Technician |
+| `flow_after_lps` | Decimal | Technician. Required, because verification normalises Δp by flow². |
 
-How they talk (verified against Momen's [Runtime API reference](https://docs.momen.app/docs/code/runtime_api/)):
+## Verification rules (already implemented in `verification.py`)
 
-- Each Momen project has one GraphQL endpoint: `https://villa.momen.app/zero/{projectExId}/api/graphql-v2`.
-- Momen generates operations for each table. For `work_order`, that means `insert_work_order_one` (create), `work_order` (list, with `where` / `order_by`) and `update_work_order_by_pk`.
-- A server-side script authenticates with the project's **Admin Bearer Token** (`Authorization: Bearer …`), found under **Developer access** in the Momen editor.
-- **Security:** the token stays on the Streamlit server, in `.streamlit/secrets.toml` locally (already in `.gitignore`) and in the host's secrets settings when deployed. It must never go into the repo, the page, or the demo video.
+- **Normalise for flow:** Δp* = Δp·(Q_ref/Q)². Readings below 30 % of design flow are rejected.
+- **Uncertainty:**
+  - Instrument accuracies come from datasheets and are treated as rectangular (GUM); a single DP transmitter and two absolute transmitters are handled differently.
+  - The baseline carries the same instrument uncertainty plus an optional repeatability term.
+  - The result is an expanded uncertainty U at **k = 2** (≈95 %).
+- **Verdicts:**
+  - **RESTORED:** within the baseline ± U.
+  - **IMPROVED, NOT CLEAN:** above the band but below the maintenance limit.
+  - **NOT EFFECTIVE:** at or above the limit.
+  - **SUSPICIOUSLY LOW:** below the band; possible torn screen, bypass or sensor fault.
+- **NPSH outcome:** reported separately at design flow, together with the “suction still below atmospheric” note when it applies.
+- **Defaults are example values, not field data:** the datasheet figures (0–400 kPa transmitters at ±0.1 % of span, flow meter at ±0.5 %) and the 5 kPa baseline.
 
-Example create call (field names must match what you create in Momen):
+## Security
 
-```graphql
-mutation CreateWorkOrder($object: work_order_insert_input!) {
-  insert_work_order_one(object: $object) { id }
-}
-```
+| Item | Rule |
+|---|---|
+| Momen credentials | Prefer a **dedicated Momen user** for Pump Detective with permission to create and read work orders only, signing in with username and password to get a JWT. The **Admin Bearer Token** (full data access) is acceptable only for local development. |
+| Storage | `.streamlit/secrets.toml` locally (git-ignored), or the host's secrets settings when deployed. Never in code, README, issues or `.env` committed to git (add `.env` to `.gitignore` if one is ever used). |
+| Who calls Momen | Streamlit's server-side Python only. Nothing is sent to the browser. Show only our own error messages, never raw exceptions, request headers or responses. |
+| Technician app | Momen pages run as **guest** unless people sign in. Guests must have **no** write permission on `work_order`. The technician signs in and may only update `status`, `dp_after_kpa` and `flow_after_lps`. |
+| Leaks | If a token leaks, rotate it or change the service user's password. **Admin-token rotation in Momen is not yet verified**; check it in step 2. |
+| Never in GitHub or the video | The admin token, JWTs, the service user's password, `secrets.toml`, Momen's Developer-access / Connect Backend screens, and the GenHacks credit access code. |
 
-## 3. Momen data model (build this exactly; the names become the API)
+## Tools: the Momen MCP server
 
-Table **`work_order`** (Momen adds `id` and `created_at` automatically):
+The official `momen-mcp` package (v2.8.4, Nov 11 2026; README read, not yet tested) can, after **your** browser OAuth login:
+- create and edit tables and permissions;
+- store secrets and edit Actionflows;
+- publish the backend (`sync_backend`);
+- run GraphQL queries and inserts.
 
-| Field | Type | Example | Filled by |
+Page editing exists but is low-level, so build the two technician screens in Momen's visual editor (or with its AI Copilot). Installing the package runs Momen's npm code on your machine, so it needs your approval. Claude never needs to see a token.
+
+## Implementation order
+
+| # | Step | Who | Done when |
 |---|---|---|---|
-| `asset` | Text | CHWPP-01 suction strainer | Pump Detective |
-| `action` | Text | Schedule suction strainer cleaning and inspection | Pump Detective |
-| `priority` | Text | URGENT / HIGH / PLANNED / NONE | Pump Detective |
-| `complete_by` | Text (YYYY-MM-DD) | 2026-12-07 | Pump Detective |
-| `driver` | Text | NPSH WARNING (margin 1.00 m lost) | Pump Detective |
-| `evidence` | Text (long) | Δp* 10.7 kPa vs 5 kPa clean, +1.18 %/day … | Pump Detective |
-| `dp_before_kpa` | Decimal | 10.7 | Pump Detective |
-| `forecast_scenario` | Text | Gradual fouling (synthetic) | Pump Detective |
-| `status` | Text | OPEN → IN_PROGRESS → DONE | Technician |
-| `dp_after_kpa` | Decimal | 5.3 | Technician |
-| `technician_notes` | Text (long) | Heavy debris in basket, flushed | Technician |
-| `completed_at` | Date/time | — | Technician (“Mark done”) |
+| 1 | ✅ Verification engine and manual form | Claude | Done: 25 unit tests pass |
+| 2 | Redeem credit, create the Momen project, decide on `momen-mcp` (install + sign in if yes); check whether admin tokens can be rotated | You | Empty project exists |
+| 3 | Create the `work_order` table (7 fields), service-user and technician roles with the permissions above; publish; insert one test row | Claude via MCP, or you with guidance | Test row visible via GraphQL |
+| 4 | Put the endpoint and credentials in `.streamlit/secrets.toml` | You | File exists and is git-ignored |
+| 5 | `momen_client.py` (create and list work orders, timeouts, safe errors), **Send work order** button, read back DONE orders into `verify_cleaning`; feature flag; mocked tests | Claude | Send → row appears in Momen; DONE row → verdict in Pump Detective |
+| 6 | Technician screens: open-orders list + detail form (Δp, flow, Done) | You in the Momen editor, with guidance | Completed on a phone |
+| 7 | End-to-end run; README, DEMO (≈25 s segment) and Devpost tools list; commit | Both | Loop works twice in a row |
 
-`complete_by` is Text on purpose: it avoids date-format surprises in the first version.
+**Time limit:** if step 5 doesn't work end-to-end by **Dec 15**, ship without Momen. Step 1 already tells the verification story. Devpost closes **Dec 26, 12:00 AM ET**; the credit code expires **Dec 25**.
 
-## 4. Momen pages
+## Video segment (≈25 s, only if it works reliably)
 
-1. **Work orders (list).** Cards sorted by priority, then `complete_by`, with a status filter. Colour the priority: URGENT red, HIGH orange, PLANNED yellow.
-2. **Work order (detail).** Shows all fields read-only, plus inputs for `dp_after_kpa` and `technician_notes`. Buttons:
-   - **Start**: status → IN_PROGRESS.
-   - **Mark done**: status → DONE and `completed_at` → now.
-
-Optional, only if time remains: a Momen AI Agent that answers technician questions about one work order. Not recommended at first, because it duplicates the AI that already lives in Pump Detective.
-
-## 5. Pump Detective changes (Python, done with Claude)
-
-- **New file `momen_client.py`:**
-  - `create_work_order(fields) -> id`
-  - `list_work_orders(limit=20) -> rows`
-  - Includes timeouts and clear error messages, never sends the token anywhere but Momen, and treats GraphQL `errors` as failures.
-- **Detective Intelligence:** a **Send work order to Momen** button under the maintenance recommendation. It sends the rule-based work order fields, not free AI text, so the record is always consistent. It shows the new work-order id, and refuses to send if the priority is NONE.
-- **Work-order status panel:** lists recent work orders from Momen. For DONE orders it compares `dp_after_kpa` with the 5 kPa clean reference: “Verified: back to clean” or “Still restricted: inspect again”.
-- **Feature flag:** without `MOMEN_GRAPHQL_URL` and `MOMEN_ADMIN_TOKEN` configured, the button explains how to connect Momen and the rest of the app works unchanged. A **Download work order (JSON)** fallback allows manual entry.
-- **Tests:** unit tests with a mocked HTTP response for both calls, including an error response.
-
-## 6. Step-by-step schedule
-
-| # | Step | Who | Estimate | Done when |
-|---|---|---|---|---|
-| 0 | Redeem the $100 credit; create a Momen project; attend or watch the Nov 20 workshop | You | 1 h + workshop | Empty project opens in the editor |
-| 1 | Create the `work_order` table exactly as in section 3; publish | You (Claude can guide live) | 1 h | Table visible in GraphiQL (Developer access) |
-| 2 | In GraphiQL, insert one test row with `insert_work_order_one` | You + Claude | 20 min | Row appears in Momen's data view |
-| 3 | Put the endpoint and admin token in `.streamlit/secrets.toml` (local only) | You | 5 min | File exists and is git-ignored |
-| 4 | Build `momen_client.py`, the button, the status panel and tests | Claude | 1–2 h | Send from Pump Detective → row appears in Momen |
-| 5 | Build the Momen list and detail pages with Start / Mark done | You | 2–3 h | Technician can complete an order on a phone |
-| 6 | End-to-end check: send → complete in Momen → verified in Pump Detective | Both | 30 min | Status panel shows “Verified: back to clean” |
-| 7 | Update README, DEMO script (≈20 s for the loop) and Devpost tools list | Claude | 30 min | Docs mention Momen and the loop |
-
-Total: about 6–8 hours, mostly learning Momen. Deadline: Devpost closes **Dec 26, 12:00 AM ET**, and the Momen credit code expires **Dec 25**.
-
-## 7. Risks and decisions
-
-- **The admin token is powerful.** Keep it server-side only. If it leaks (repo, screenshot, video), regenerate it in Momen right away. A later improvement would be a dedicated Momen Actionflow with limited permissions instead of the admin token.
-- **Field names must match exactly** between Momen and `momen_client.py`. Section 3 is the contract, so change both together.
-- **Momen plan limits** (records, publishing) are unknown until the project is created. Check them in step 0.
-- **Deployment:** if Pump Detective is deployed, the token goes into the host's secret settings, never into the code.
-- **Scope guard:** if Momen eats too much time, stop after step 4 with the GraphQL push working. The data model plus Momen's built-in data view is already demonstrable.
-
-## 8. Demo addition (≈20 seconds)
-
-“Pump Detective sends the work order to our Momen technician app. The technician cleans the strainer, records 5.3 kPa and marks it done, and Pump Detective confirms the strainer is back to its clean reference. That closes the predict → act → verify loop.”
+1. **(4 s)** Click **Send work order to Momen**.
+2. **(10 s)** On a phone in the Momen app: the PLANNED order, due 7 Dec. The technician enters 5.1 kPa at 21.0 L/s and taps **Done**.
+3. **(11 s)** In Pump Detective: “Strainer RESTORED: 5.20 kPa within 5.00 ± 0.94 kPa; NPSH SAFE; suction still below atmospheric, so check fill pressure.”
