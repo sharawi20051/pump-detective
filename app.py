@@ -920,7 +920,7 @@ with fouling:
         y=alt.Y("limit:Q", scale=y_scale),
         color=alt.Color("Threshold:N", scale=alt.Scale(
             domain=["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
-            range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None)),
+            range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
         tooltip=["Threshold", alt.Tooltip("limit:Q", format=".1f")],
     )
     today_layer = alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_today, time(23, 59))]})).mark_rule(
