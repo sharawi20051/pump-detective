@@ -1,106 +1,125 @@
 # Pump Detective
 
-Pump Detective is an educational web app for investigating low suction pressure and cavitation risk in a chilled-water pump system. It shows how one extra pressure reading, before the suction filter, separates a restricted filter from a problem upstream. It then estimates net positive suction head available (NPSHa), compares it with a published pump curve and an engineer-selected safety margin, simulates repairs, and explains the result with rule-based findings and an optional AI explanation.
+**Predictive maintenance for chilled-water pump strainers, a prototype built for GenHacks 2026.**
 
-All data are **simulated**. Nothing in the app has been validated with field measurements.
+A clogging suction strainer slowly eats a pump's NPSH safety margin until the pump cavitates. Pump Detective trends strainer pressure drop, corrects it for flow, **predicts when the NPSH margin will be lost**, schedules cleaning before that happens, writes the work order, and **verifies after maintenance whether the cleaning actually worked**.
 
-## Run locally
+**Live app:** _link to be added_ · All data are **synthetic**. Nothing has been validated with field measurements.
 
-Use Python 3.12 or 3.13. Open a terminal in the folder that contains `app.py`.
+## The story
 
-Windows PowerShell:
-
-```powershell
-py -m pip install -r requirements.txt
-py -m streamlit run app.py
+```
+MONITOR → DIAGNOSE → PREDICT → RECOMMEND → MAINTAIN → VERIFY
 ```
 
-macOS or Linux:
+| Step | What happens | Where |
+|---|---|---|
+| Monitor | 60-day hourly sensor log (synthetic): flow, pressure before the strainer, suction pressure | Fouling forecast |
+| Diagnose | Flow-normalised strainer Δp; sensor glitches and debris events detected | Fouling forecast, Strainer diagnostics |
+| Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits | Fouling forecast |
+| Recommend | Clean-by date and priority from deterministic rules; work order written by AI or offline | Fouling forecast, Detective Intelligence |
+| Maintain | Technician cleans the strainer and records one Δp reading and the flow | Verify the maintenance form |
+| Verify | RESTORED / IMPROVED, NOT CLEAN / NOT EFFECTIVE / SUSPICIOUSLY LOW, plus NPSH after cleaning | Fouling forecast |
 
-```bash
-python3 -m pip install -r requirements.txt
-python3 -m streamlit run app.py
+## Architecture: Python decides, AI explains
+
+```
+Engineering calculations (NPSHa, NPSHr, margin, Q² normalisation)   app.py, pump_detective.py
+        ↓
+Statistical forecast (trend, anomalies, time to limit)               forecast.py
+        ↓
+Maintenance decision (priority, clean-by date, verification verdict) app.py, verification.py
+        ↓
+AI explanation / work order (optional; offline fallback)             app.py (OpenAI Responses API)
 ```
 
-Open the Local URL shown in the terminal. The original text demo runs with `py pump_detective.py` (Windows) or `python3 pump_detective.py` (macOS/Linux).
-
-Optional AI explanations need an OpenAI API key, set as `OPENAI_API_KEY` or pasted into the app for the session only. Without a key, use the **Offline** explanation.
+Every number, status, priority and date is computed in Python before the AI sees it. The AI is instructed not to change or invent any of them. Offline mode produces the same work order with no API key.
 
 ## What is in the app
 
 | Tab | What it does |
 |---|---|
-| Filter diagnostics | Reveal the hidden upstream reading; the rule says whether to check the filter or upstream. |
-| Cavitation Shield | NPSHa at the pump suction flange vs the Lowara demo curve; SAFE / WARNING / CRITICAL against the sidebar margin. |
-| Repair simulation | Rooftop fault scenario: compares cleaning the filter, resizing a pipe and adding pressure. |
-| Fouling forecast | **Predictive maintenance:** trends a 60-day synthetic sensor log, flags anomalies, and forecasts when strainer fouling will reach the maintenance limit and erase the NPSH margin. |
-| Secondary pump · Part-load / VFD | Part-load snapshot; NPSH is assessed only with user-supplied pump-specific NPSHr. |
-| Detective Intelligence | Prioritised findings with evidence and next checks for one snapshot (fouling forecast, repair case or secondary pump); downloadable report; AI or offline explanation, including a maintenance work order built from the forecast. |
+| **Fouling forecast** | The predictive core: synthetic sensor log, flow-normalised trend, anomaly detection, forecast to each limit, clean-by recommendation, and the post-maintenance verification form. |
+| **Detective Intelligence** | Ranked findings with evidence and next checks; maintenance work order (AI or offline); downloadable report. |
+| Repair simulation | Fault diagnosis: one extra reading shows whether low suction comes from the strainer or from upstream; compares cleaning, pipe resizing and adding pressure. |
+| Strainer diagnostics | The basic "reveal the missing reading" rule on three cases. |
+| Cavitation Shield | NPSHa at the suction flange vs the Lowara demo curve; SAFE / WARNING / CRITICAL. |
+| Secondary pump · Part-load / VFD | Part-load snapshot; NPSH assessed only with user-supplied pump-specific NPSHr. |
 
-## Model and data
+## Engineering method
 
-- **Pressures:** every pressure is absolute (kPa abs). Normal suction for the demo plant is 105 kPa abs.
-- **Design reference:** equipment schedule MH010001, primary chilled-water pump CHWPP-01, 21.2 L/s and 15 m design head. Design head is not NPSH.
-- **Pump curve:** [Xylem Lowara e-NSC catalog, page 100](https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/191002951_nsc-50hz_en.pdf#page=100), NSC 80-200/55 at about 1450 rpm. NPSHr points were read approximately from the graph. The installed CHWPP-01 pump model has not been confirmed. The catalogue's separate 0.50 m allowance is shown for comparison and is not added to the engineer margin.
-- **NPSHa:** static absolute pressure at the DN100 suction flange plus velocity head, minus the vapour pressure of water at 20 °C (conservative; chilled water is colder). The diameter is fixed by the pump. Inputs at or below vapour pressure, or with implausible velocity (above 5 m/s), are reported as NOT ASSESSED.
-- **Fault scenario:** the repair cases model a rooftop plant whose closed loop has lost fill pressure, so suction is far below atmospheric. With this pump's NPSHr of about 1 m, cavitation is only possible at deeply sub-atmospheric suction. The app flags sub-atmospheric suction as its own finding.
-- **Simplifications:** the repair comparison holds flow and the pressure upstream of the filter fixed, assumes negligible loss between filter outlet and pump suction, and models straight-pipe friction only (80 mm, 12 m, Darcy f = 0.025). The 5 kPa clean-filter drop and ±2 kPa tolerance are demonstration values.
+- **Pressures:** all absolute (kPa abs).
+- **NPSHa:** static absolute pressure at the DN100 suction flange + velocity head − vapour pressure of water at 20 °C (conservative; chilled water is colder). Inputs at or below vapour pressure, or with velocity above 5 m/s, are reported as NOT ASSESSED.
+- **NPSHr:** points read approximately from the [Xylem Lowara e-NSC catalog, page 100](https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/191002951_nsc-50hz_en.pdf#page=100), NSC 80-200/55 at about 1450 rpm. This is a reference pump; the installed CHWPP-01 model is not confirmed.
+- **NPSH status:**
+  - CRITICAL: NPSHa below NPSHr.
+  - WARNING: the engineer-selected margin (sidebar, default 1.0 m) is not met.
+  - SAFE: otherwise.
 
-## Fouling forecast (predictive maintenance)
+  The catalogue's 0.5 m allowance is shown separately and is not added to the margin.
+- **Flow normalisation:** strainer loss follows Δp = K·Q² (turbulent flow), so readings are converted to design flow (21.2 L/s): Δp* = Δp·(Q_ref/Q)². Readings below 30 % of design flow are rejected.
+- **Physics-based limits:** allowable strainer Δp = pressure before the strainer − suction pressure needed for NPSHr (+ margin), at design flow.
 
-`forecast.py` holds the method; it uses only numpy and pandas and has unit tests.
+## Predictive method (`forecast.py`)
 
-1. **Synthetic sensor log.** 60 days of hourly flow, pressure before the strainer and suction pressure. Flow varies with a daily load cycle and chiller staging; sensors have noise; a few hours contain injected sensor glitches. Three scenarios: gradual fouling, a debris slug on day 45, and a stable strainer. The data are generated by the app and labelled as synthetic.
-2. **Flow normalisation.** Strainer loss follows Δp = K·Q², so each reading is converted to design flow: Δp* = Δp·(Q_ref/Q)². This removes the flow-driven swing and leaves the fouling signal.
-3. **Anomaly detection.** Isolated outliers (robust z-score against a 25-hour rolling median) are flagged and excluded. A jump of more than 1.5 kPa in the daily median is treated as a step change, and the trend is refitted from that day.
-4. **Trend fit.** ln(Δp*) is fitted linearly against time on recent daily medians (exponential fouling), with a 95% statistical range on the rate.
-5. **Physics-based limits.** The NPSH thresholds become allowable strainer Δp values: allowable Δp = pressure before the strainer − suction pressure needed for NPSHr (+ the engineer margin), at design flow. A maintenance Δp limit (illustrative 20 kPa) is also shown.
-6. **Recommendation.** The app gives the date by which to clean the strainer, the threshold that drives it, and whether cleaning alone can restore the margin.
+1. **Synthetic log:** daily load cycle and chiller staging, sensor noise, injected sensor glitches. Three scenarios: gradual fouling, a debris slug on day 45, and a stable strainer.
+2. **Anomalies:** isolated outliers (robust z-score above 6 against a 25-hour rolling median) are excluded. A jump of more than 1.5 kPa in the daily median is a step change, and the trend is refitted from that day.
+3. **Trend:** ln(Δp*) is fitted linearly against time on recent daily medians (exponential fouling), with a 95 % range on the rate.
+4. **Forecast:** days until each limit; the recommendation uses the earliest estimate, plus whether cleaning alone can restore the margin.
 
-## Maintenance verification
+## Maintenance verification (`verification.py`)
 
-After cleaning, the **Verify the maintenance** form in the Fouling forecast tab takes one strainer Δp reading and the flow at that moment (`verification.py`, unit tested):
-
-- **Flow normalisation:** Δp* = Δp·(Q_ref/Q)². A reading taken at low flow cannot pass as clean.
-- **Uncertainty:** an expanded uncertainty at k = 2 is built from instrument datasheet accuracies, treated as rectangular limits (GUM), for either two absolute transmitters or one DP transmitter. An optional baseline repeatability term can be added.
+- One post-cleaning Δp reading **and the flow at that moment**, flow-normalised. A low-flow reading cannot pass as clean.
+- **Clean band:** the expanded uncertainty (k = 2) of the difference from the clean baseline. It comes from instrument datasheet accuracies treated as rectangular limits (GUM), for either two absolute transmitters or one DP transmitter, plus optional baseline repeatability.
 - **Verdicts:**
-  - RESTORED (within the clean band);
-  - IMPROVED, NOT CLEAN;
-  - NOT EFFECTIVE (still at or above the maintenance limit);
-  - SUSPICIOUSLY LOW (possible torn screen, bypass or sensor fault).
-- **NPSH:** the outcome at design flow is reported separately. The app notes when suction is still below atmospheric pressure.
-
-The default instrument figures and the 5 kPa baseline are example values, not field data. The verdict also feeds Detective Intelligence and the work order. `docs/MOMEN_PLAN.md` describes the planned Momen technician app that will supply these readings.
+  - RESTORED: within the band.
+  - IMPROVED, NOT CLEAN: above the band, below the maintenance limit.
+  - NOT EFFECTIVE: at or above the limit.
+  - SUSPICIOUSLY LOW: below the band; possible torn screen, bypass or sensor fault.
+- **NPSH after cleaning:** reported separately.
+- **Input checks:** missing, zero, out-of-range and physically impossible readings are rejected with a clear message.
 
 ## AI maintenance recommendation
 
-Detective Intelligence defaults to the **Fouling forecast** snapshot. The forecast is packaged as structured data: current Δp*, fouling rate and range, NPSH status, time to each threshold, detected events, and a rule-based recommendation with priority (URGENT = now, HIGH = within 14 days, PLANNED = later, NONE). The rules also turn that into ranked findings.
+Detective Intelligence opens on the Fouling forecast snapshot. Ask **"What maintenance should we schedule?"** to get a work order: Action, Priority, Complete by, Why, Also check, Confidence.
 
-Ask **“What maintenance should we schedule?”** to get a work order with these headings: Action, Priority, Complete by, Why, Also check, Confidence.
+- **Priority rule:** URGENT = due now, HIGH = within 14 days, PLANNED = later, NONE = nothing within 180 days. It is set by the rules, not the AI.
+- **OpenAI mode** (optional, `OPENAI_API_KEY`): the model may use only the forecast's own dates, priority and ranges, must state that the data are synthetic, and must report verification verdicts exactly.
+- **Offline mode** (the default without a key): the same work order, built deterministically.
 
-- **OpenAI mode** sends the snapshot to the Responses API. The instructions let the model recommend timing only from the forecast's own dates, priority and ranges, never invent new ones. It must say the data are synthetic, and must say so when cleaning alone cannot restore the NPSH margin.
-- **Offline mode** builds the same work order deterministically, so the demo works without an API key.
+## Limitations
 
-When the upstream pressure is too low to meet the margin even with a clean strainer, the recommendation becomes “restore system pressure” rather than “clean the strainer”.
+- All sensor data are synthetic. The pump curve is a published reference read by eye, not the installed pump's.
+- The demo plant is a **low-pressure rooftop plant** (33 kPa abs before the strainer), so suction is below atmospheric. With this pump's low NPSHr, strainer fouling only threatens the NPSH margin at such low pressures; the app flags the low suction separately.
+- The forecast range reflects uncertainty in the fouling **rate** only. Real fouling can accelerate or stop; re-run the forecast as data arrive.
+- Anomaly thresholds, the 5 kPa clean baseline, the 20 kPa maintenance limit and the instrument accuracies are example values.
+- The diagnosis tabs use an illustrative ±2 kPa tolerance. Verification uses the instrument-based band instead.
+- NPSH after cleaning assumes the pressure before the strainer is unchanged. Water properties are taken at 20 °C.
+- The AI's wording is not automatically cross-checked against the calculated numbers; the findings are shown alongside it.
 
-The range reflects fit uncertainty only. Real fouling can accelerate or stop, so the forecast must be re-run as new data arrive.
+## Run locally
+
+Use Python 3.12 or 3.13, in the folder that contains `app.py`:
+
+```bash
+py -m pip install -r requirements.txt
+py -m streamlit run app.py
+```
+
+(macOS/Linux: use `python3` instead of `py`.)
 
 ## Tests
+
+32 unit tests cover the forecast, flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
 
 ```bash
 py -m unittest discover tests
 ```
 
-## Try the demo
+## Future work
 
-1. Open **Repair simulation**. Both scenarios start at **8 kPa abs** at the pump suction.
-2. In **Scenario A**, turn on **Reveal pressure before the filter**. The filter drop is **25 kPa**. Select **Simulate a clean filter**: NPSHa rises from **0.95 m to 2.99 m**, from CRITICAL to SAFE.
-3. Switch to **Scenario B** and reveal the reading. The drop is already **5 kPa**, the clean reference, so the app points upstream.
-4. Open **Fouling forecast**. With **Gradual fouling**, the app recommends cleaning before the NPSH margin is lost in about three weeks. Switch to **Debris slug** to see the step change detected and an immediate clean-now alert. Set the pressure before the strainer to 105 kPa abs to see a healthy plant where only the maintenance limit matters.
-5. Open **Detective Intelligence**. With the default Fouling forecast snapshot, choose **What maintenance should we schedule?** and generate the work order (Offline needs no key). Then switch the snapshot to the repair case to see the findings, including the sub-atmospheric suction warning that remains even after cleaning.
+Real sensor ingestion, alerts, multiple pumps, a forecast range that includes level uncertainty, and an automated check of AI wording against the calculated numbers. A technician work-order app (Momen) was prototyped but **not integrated**; see `docs/MOMEN_PLAN.md`.
 
 ## Tools
 
-Python implements the calculations and diagnostic rules; numpy and pandas run the trend analysis; Streamlit and Altair provide the interface and charts; the OpenAI Responses API provides optional explanations. ChatGPT and Claude Code assisted with code, review and documentation.
-
-`archive/` holds an earlier 3-tab version for reference only. The current app is `app.py` in this folder.
+Python (calculations and rules), numpy and pandas (trend analysis), Streamlit and Altair (interface and charts), OpenAI Responses API (optional explanations). ChatGPT and Claude Code assisted with code, review and documentation. `archive/` holds an earlier version for reference only.

@@ -1,17 +1,34 @@
-# GenHacks demo recording
+# GenHacks demo recording (≤ 3:00)
 
-Track: to be decided. Open is the safe default; the AI track becomes a better fit once the AI layer recommends maintenance. The prototype uses simulated data and engineering rules.
+Story: the pump is safe today → fouling rises once flow is corrected for → a future NPSH-margin violation is predicted → maintenance is scheduled first → the work order is written → the strainer is cleaned → the post-maintenance reading is entered → Pump Detective verifies the result.
+
+Suggested track: **AI, Agentic Systems, Cybersecurity & Dev Tools** (AI integrated with engineering guardrails). Open is the safe alternative. All data are synthetic; say so on screen.
+
+## Before recording
+
+- Open the app on **Fouling forecast**, scenario **Gradual fouling**, 33 kPa abs before the strainer, sidebar margin 1.00 m.
+- In **Detective Intelligence**, select **Offline** (or OpenAI if a key is configured) and the question **What maintenance should we schedule?**. Don't generate yet.
+- Don't show API-key settings, the terminal, Momen, downloads or the `archive/` folder.
+- Record at 1280 px wide or more; zoom the browser to about 110 %.
+
+## Script
 
 | Time | Show | Say |
 |---|---|---|
-| 0:00–0:15 | Open **Repair simulation** and point to the fault-scenario text. | “A rooftop chiller plant has lost system pressure, and pump suction is far below atmospheric. Is the strainer to blame, or something upstream?” |
-| 0:15–0:45 | Scenario A: reveal the upstream pressure, then **Simulate a clean filter**. | “One extra reading shows a 25 kPa drop across the strainer. Cleaning raises available suction head from 0.95 to 2.99 metres, from CRITICAL to SAFE.” |
-| 0:45–1:05 | Switch to Scenario B and reveal the reading. | “Same suction pressure, but the strainer drop is normal, so the problem is upstream. Cleaning would not help.” |
-| 1:05–1:55 | Open **Fouling forecast** (Gradual fouling). Point at the grey dots, then the blue line, then the orange forecast and the threshold lines. | “That is diagnosis. To predict, we trend 60 days of sensor data, synthetic for this prototype. Raw Δp swings with flow, so we normalise it to design flow. Physics converts our NPSH margin into an allowable strainer Δp, and the trend tells us we lose the margin in about three weeks. Clean before this date.” |
-| 1:55–2:20 | Switch to **Debris slug**. Point at the events table. | “Here a debris event on day 45 is detected automatically, the trend is refitted, and the alert becomes clean now. Sensor glitches are flagged and ignored.” |
-| 2:20–2:45 | Open **Detective Intelligence** (Fouling forecast snapshot). Ask **What maintenance should we schedule?** and generate. | “The AI turns the forecast into a work order: action, priority, complete-by date and evidence. It may only use the forecast's own dates, and it flags that suction is still below atmospheric, which cleaning won't fix. With no API key, the same work order is built offline.” |
-| 2:45–2:55 | Close on the forecast chart. | “The pressures are simulated and the pump curve is a published reference. The method is ready for real sensor data.” |
+| 0:00–0:15 | **Fouling forecast**: the three figures (Δp* 10.7 kPa, fouling rate, NPSHa 2.41 m **SAFE**) | "This chilled-water pump is safe today. But its suction strainer is clogging, and a clogged strainer silently eats the margin that keeps the pump from cavitating." |
+| 0:15–0:50 | Chart: grey dots → blue line → orange forecast → coloured limit lines | "Raw pressure drop swings with flow, the grey dots. Strainer loss scales with flow squared, so we correct every reading to design flow: the blue line, the real fouling trend. Physics turns our NPSH safety margin into a strainer limit, the yellow line, and the trend is projected to it." |
+| 0:50–1:05 | Forecast table and the yellow banner (clean-by date about 20 days from the recording day; the dates move with today's date) | "The margin is lost in about 24 days, 20 to 30. So Pump Detective schedules cleaning before the earliest estimate." |
+| 1:05–1:15 | Events table | "Sensor glitches are detected and excluded, so they can't trigger false alarms." |
+| 1:15–1:50 | **Detective Intelligence** → Generate | "Python makes every engineering decision: dates, priority, limits. The AI only writes the work order from those facts and isn't allowed to change them. Without an API key, the same work order is built offline." |
+| 1:50–2:15 | Back to **Fouling forecast** → Verify: 5.1 kPa at 21.0 L/s → **RESTORED** | "After cleaning, the technician records one reading and the flow. Corrected to design flow, it's inside the clean band, ±0.94 kPa from the instrument accuracy. Strainer restored, NPSH safe." |
+| 2:15–2:35 | Enter 4.9 kPa at 14.8 L/s → **IMPROVED, NOT CLEAN** | "Here's why flow matters: 4.9 kPa looks clean, but it was measured at low flow. At design flow it's 10 kPa, so this cleaning did not work." |
+| 2:35–2:50 | *(Optional)* Note on the blue info box | "It also notes that suction is still below atmospheric in this low-pressure plant, a problem cleaning alone can't fix." |
+| 2:50–3:00 | Close on the chart | "Monitor, diagnose, predict, recommend, maintain, verify. Synthetic data and a published pump curve today; ready for real sensors." |
 
-Before submitting: push the source to a public repository; record the demo on YouTube or Vimeo with embedding enabled and keep it under three minutes; on Devpost add the code and video links, the chosen track, every team member, and the tools used, including AI tools.
+Cuts if you run long: drop the optional 2:35 note first, then the events table.
+
+## Devpost checklist
+
+Public GitHub link, deployed app link, embeddable YouTube or Vimeo video, track, every team member, tools used including AI tools (ChatGPT, Claude Code, OpenAI API), and 3 screenshots (forecast chart, work order, RESTORED verdict).
 
 [GenHacks submission requirements](https://genhacks-open.devpost.com/#requirements)

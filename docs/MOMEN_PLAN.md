@@ -2,9 +2,15 @@
 
 **Decision:** build a small closed loop. Pump Detective sends a work order → the technician completes it in Momen with a post-cleaning reading → Pump Detective reads it back and **verifies** the result.
 
-**Status:**
-- Step 1, verification in Python, is **done**: `verification.py` plus the “Verify the maintenance” form in the Fouling forecast tab.
-- Steps 2–7 are not started.
+**Status: FROZEN for GenHacks (19 Nov 2026). Not part of the submission. Not integrated, never tested end to end.**
+- Step 1, verification in Python, is **done** and is part of Pump Detective: `verification.py` plus the “Verify the maintenance” form in the Fouling forecast tab.
+- Momen backend partially prototyped on the Free plan, then stopped:
+  - a `work_order` table and a locked `staff_member` table;
+  - tightened default permissions;
+  - one `complete_work_order` workflow.
+- **Never run:** the developer's network blocks Momen's data server.
+- **Not built:** the Pump Detective ↔ Momen connection, the technician screens, publishing (which needs Basic).
+- Pump Detective works fully without Momen.
 
 Momen is optional for GenHacks. The sponsor gives every participant $100 in credit (code valid Nov 1 – Dec 25; redeem link and access code are in the GenHacks Devpost update “Momen Workshop for GenHacks”) and runs a workshop on **Nov 20, 4:30–5:30 PM PST**. Using Momen gives no stated judging bonus.
 

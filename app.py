@@ -27,7 +27,7 @@ from pump_detective import (
 SCENARIOS = {
     "Case A · Low downstream pressure": (110.0, 85.0),
     "Case B · Low downstream pressure": (90.0, 85.0),
-    "Clean filter · Reference case": (110.0, 105.0),
+    "Clean strainer · Reference case": (110.0, 105.0),
 }
 
 
@@ -137,7 +137,7 @@ def diagnostic_findings(npsha, npshr, required_margin, flow_lps,
     """Return ordered, evidence-based checks for one operating snapshot.
 
     Missing references are explicit; no probability or physical fault is inferred.
-    Filter comparisons require a clean reference at this same flow/condition.
+    Strainer comparisons require a clean reference at this same flow/condition.
     ``npsha_problem`` (a message) marks the suction reading as unusable for NPSH.
     """
     values = (npsha, npshr, required_margin, flow_lps, filter_drop,
@@ -188,26 +188,26 @@ def diagnostic_findings(npsha, npshr, required_margin, flow_lps,
                 "Confirm the selected curve and margin. This result does not establish overall pump health.")
 
     if filter_drop is None:
-        add(2, "Filter restriction not assessed", "Paired filter pressure readings are missing.",
-            "Measure pressure immediately before and after the filter at the same operating condition.")
+        add(2, "Strainer restriction not assessed", "Paired strainer pressure readings are missing.",
+            "Measure pressure immediately before and after the strainer at the same operating condition.")
     elif filter_drop < 0:
-        add(0, "Filter pressure readings inconsistent", f"Filter Δp = {filter_drop:+.2f} kPa.",
+        add(0, "Strainer pressure readings inconsistent", f"Strainer Δp = {filter_drop:+.2f} kPa.",
             "Check pressure units, instrument readings, tap locations and flow direction before diagnosing restriction.")
     elif clean_drop is None or filter_tolerance is None:
-        add(2, "Filter reference missing", f"Measured filter Δp = {filter_drop:.2f} kPa.",
-            "Supply a clean-filter pressure-drop reference and comparison tolerance for this same flow and fluid condition.")
+        add(2, "Strainer reference missing", f"Measured strainer Δp = {filter_drop:.2f} kPa.",
+            "Supply a clean-strainer pressure-drop reference and comparison tolerance for this same flow and fluid condition.")
     elif filter_drop > clean_drop + filter_tolerance:
-        add(1, "Possible filter restriction",
+        add(1, "Possible strainer restriction",
             f"Δp {filter_drop:.2f} kPa exceeds clean reference {clean_drop:.2f} + tolerance {filter_tolerance:.2f} kPa.",
-            "Verify the reference and pressure readings; inspect the filter, then remeasure. Restriction is a candidate, not a confirmed root cause.")
+            "Verify the reference and pressure readings; inspect the strainer, then remeasure. Restriction is a candidate, not a confirmed root cause.")
     elif filter_drop < clean_drop - filter_tolerance:
-        add(2, "Filter comparison needs verification",
+        add(2, "Strainer comparison needs verification",
             f"Δp {filter_drop:.2f} kPa is below clean reference {clean_drop:.2f} − tolerance {filter_tolerance:.2f} kPa.",
             "Check actual flow, bypass condition, pressure readings and whether the clean reference applies.")
     else:
-        add(3, "Filter drop within selected reference band",
+        add(3, "Strainer drop within selected reference band",
             f"Δp {filter_drop:.2f} kPa; clean reference {clean_drop:.2f} ± {filter_tolerance:.2f} kPa.",
-            "If NPSH remains deficient, investigate upstream pressure and other suction-side losses; the filter comparison alone cannot identify the cause.")
+            "If NPSH remains deficient, investigate upstream pressure and other suction-side losses; the strainer comparison alone cannot identify the cause.")
 
     if min_flow is None:
         add(2, "Minimum-flow limit not assessed",
@@ -477,8 +477,8 @@ def offline_explanation(snapshot, topic):
     rows = snapshot["findings"]
     if topic == "Why is there NPSH risk?":
         selected = [row for row in rows if "NPSH" in row["Finding"]]
-    elif topic == "Would cleaning the filter help?":
-        selected = [row for row in rows if any(word in row["Finding"].lower() for word in ("filter", "strainer", "cleaning"))]
+    elif topic == "Would cleaning the strainer help?":
+        selected = [row for row in rows if any(word in row["Finding"].lower() for word in ("strainer", "strainer", "cleaning"))]
     elif topic == "Which data are missing?":
         selected = [row for row in rows if "not assessed" in row["Finding"].lower() or "missing" in row["Finding"].lower()]
     else:
@@ -491,7 +491,7 @@ def offline_explanation(snapshot, topic):
     selected = sorted(selected, key=lambda row: row["Priority"])
     for row in selected:
         lines.extend(["", row["Finding"], row["Evidence"], "Next check: " + row["Next check"]])
-    if topic == "Would cleaning the filter help?":
+    if topic == "Would cleaning the strainer help?":
         cleaning = snapshot.get("cleaning_simulation")
         forecast = snapshot.get("forecast")
         if forecast:
@@ -508,7 +508,7 @@ def offline_explanation(snapshot, topic):
                           f"surplus/deficit: {cleaning['surplus_m']:+.2f} m.",
                           "This is a simulation, not a measured repair result."])
         else:
-            lines.extend(["", "Cleaning benefit is not calculated for this snapshot. Confirm paired pressures and a clean-filter reference before predicting an improvement."])
+            lines.extend(["", "Cleaning benefit is not calculated for this snapshot. Confirm paired pressures and a clean-strainer reference before predicting an improvement."])
     if not selected:
         lines.extend(["", "No missing assessment is listed among the implemented checks. This does not establish overall pump health."])
     return "\n".join(lines)
@@ -549,9 +549,10 @@ with st.sidebar:
         "The separate 0.50 m Xylem/catalog allowance is a reference comparison, "
         "not a universal rule and is not added to this margin."
     )
-diagnostics, cavitation, repair, fouling, part_load, intelligence = st.tabs(
-    ["Filter diagnostics", "Cavitation Shield", "Repair simulation", "Fouling forecast",
-     "Secondary pump · Part-load / VFD", "Detective Intelligence"]
+# Tab order follows the demo story: predict and recommend first, diagnosis tools after.
+fouling, intelligence, repair, diagnostics, cavitation, part_load = st.tabs(
+    ["Fouling forecast", "Detective Intelligence", "Repair simulation", "Strainer diagnostics",
+     "Cavitation Shield", "Secondary pump · Part-load / VFD"]
 )
 
 with diagnostics:
@@ -566,10 +567,10 @@ with diagnostics:
 
     before, after, difference = st.columns(3)
     before.metric(
-        "Before the filter",
+        "Before the strainer",
         f"{measured_upstream:g} kPa abs" if measured_upstream is not None else "Hidden",
     )
-    after.metric("After the filter", f"{downstream:g} kPa abs")
+    after.metric("After the strainer", f"{downstream:g} kPa abs")
     difference.metric("Pressure drop", f"{pressure_drop:g} kPa" if pressure_drop is not None else "—")
 
     st.subheader("Suggested check")
@@ -577,7 +578,7 @@ with diagnostics:
     if pressure_drop is not None:
         st.write(
             f"Pressure drop: {measured_upstream:g} − {downstream:g} = {pressure_drop:g} kPa. "
-            f"Clean-filter reference at this flow: {CLEAN_FILTER_DROP_KPA:g} kPa."
+            f"Clean-strainer reference at this flow: {CLEAN_FILTER_DROP_KPA:g} kPa."
         )
 
 
@@ -631,7 +632,7 @@ with cavitation:
 
 
 with repair:
-    st.subheader("Would cleaning the filter improve suction?")
+    st.subheader("Would cleaning the strainer improve suction?")
     st.caption(
         "Simulated absolute pressures · Lowara demo/reference pump curve · Water at 20 °C · "
         f"Fixed flow of {DESIGN_FLOW_LPS:g} L/s"
@@ -644,7 +645,7 @@ with repair:
     )
     st.caption(
         "With this pump's low NPSHr (about 1 m), cavitation is only possible at deeply sub-atmospheric suction, "
-        "so both cases are abnormal by design. Which one is caused by the filter?"
+        "so both cases are abnormal by design. Which one is caused by the strainer?"
     )
     repair_case = st.selectbox(
         "Choose a low-pressure case",
@@ -653,14 +654,14 @@ with repair:
     )
     suction_kpa = 8.0
     upstream_kpa = 33.0 if repair_case == "Scenario A" else 13.0
-    reveal = st.toggle("Reveal pressure before the filter", key="repair_reading_visible")
+    reveal = st.toggle("Reveal pressure before the strainer", key="repair_reading_visible")
     measured = upstream_kpa if reveal else None
     drop, suggestion = diagnose_filter(measured, suction_kpa)
 
     inlet, outlet, loss = st.columns(3)
-    inlet.metric("Before the filter", f"{measured:g} kPa abs" if reveal else "Hidden")
+    inlet.metric("Before the strainer", f"{measured:g} kPa abs" if reveal else "Hidden")
     outlet.metric("At pump suction", f"{suction_kpa:g} kPa abs")
-    loss.metric("Filter pressure drop", f"{drop:g} kPa" if drop is not None else "—")
+    loss.metric("Strainer pressure drop", f"{drop:g} kPa" if drop is not None else "—")
     st.info(suggestion)
 
     if reveal:
@@ -678,24 +679,24 @@ with repair:
         )
         restored_suction = upstream_kpa - CLEAN_FILTER_DROP_KPA
         after_cleaning = available_npsh(restored_suction, flow, nozzle_mm)
-        simulate_cleaning = st.checkbox("Simulate a clean filter", key="simulate_cleaning")
+        simulate_cleaning = st.checkbox("Simulate a clean strainer", key="simulate_cleaning")
         if simulate_cleaning:
             initial, cleaned = st.columns(2)
             initial.metric("NPSH available before cleaning", f"{before:.2f} m")
-            cleaned.metric("NPSH available with clean filter", f"{after_cleaning:.2f} m", f"{after_cleaning - before:+.2f} m")
+            cleaned.metric("NPSH available with clean strainer", f"{after_cleaning:.2f} m", f"{after_cleaning - before:+.2f} m")
             st.subheader("NPSH safety margin after cleaning")
             show_npsh_assessment(after_cleaning, required, engineer_margin)
             if after_cleaning < engineer_target:
-                st.info("The clean filter still falls short of the selected target. Check conditions upstream.")
+                st.info("The clean strainer still falls short of the selected target. Check conditions upstream.")
             st.caption(
                 "The model holds flow and upstream pressure fixed. It assumes a 100 mm internal "
-                "diameter and negligible pressure loss between the filter outlet and pump suction. "
-                "Cleaning sets the filter loss to the demo's 5 kPa reference."
+                "diameter and negligible pressure loss between the strainer outlet and pump suction. "
+                "Cleaning sets the strainer loss to the demo's 5 kPa reference."
             )
 
         st.subheader("Compare suction-side changes")
         st.caption(
-            "The pipe segment is before the filter. Assumed baseline: 80 mm internal diameter, "
+            "The pipe segment is before the strainer. Assumed baseline: 80 mm internal diameter, "
             "12 m straight length, and Darcy friction factor 0.025. The 100 mm pump inlet stays fixed."
         )
         new_diameter = st.slider("Proposed pipe internal diameter (mm)", 80, 160, 100, 5)
@@ -719,7 +720,7 @@ with repair:
                 }
                 for label, head in (
                     ("Current condition", before),
-                    ("Clean the filter", after_cleaning),
+                    ("Clean the strainer", after_cleaning),
                     (f"Resize pipe to {new_diameter} mm", after_resize),
                     (f"Add {pressure_needed:.2f} kPa before the pipe", max(before, engineer_target)),
                 )
@@ -738,6 +739,11 @@ with fouling:
     st.caption(
         "SYNTHETIC sensor log · 60 days of hourly readings generated by the app, not field data · "
         f"Lowara demo/reference pump · design flow {DESIGN_FLOW_LPS:g} L/s · water at 20 °C"
+    )
+    st.caption(
+        "Demo plant: a low-pressure rooftop chilled-water plant (33 kPa abs before the strainer by default), so "
+        "suction is below atmospheric even while the NPSH margin is still met. With this pump's low NPSHr, strainer "
+        "fouling only threatens the NPSH margin at such low pressures; try 105 kPa abs for a healthy plant."
     )
     fc_scenario = st.selectbox("Synthetic sensor history", list(fc.SCENARIOS), key="fc_scenario")
     st.write(fc.SCENARIOS[fc_scenario]["story"])
@@ -983,6 +989,10 @@ with fouling:
         "After cleaning, record one strainer Δp reading **and the flow at that moment**. The reading is "
         "flow-normalised and compared with the clean baseline within the measurement uncertainty of your instruments."
     )
+    st.caption(
+        "This band is computed from instrument accuracy, so it differs from the illustrative ±2 kPa tolerance used "
+        "by the quick diagnosis tabs. The NPSH result below assumes the pressure before the strainer is unchanged."
+    )
     with st.form("verify_form"):
         v1, v2 = st.columns(2)
         v_dp = v1.number_input("Post-cleaning strainer Δp (kPa)", min_value=0.0, value=None, step=0.1,
@@ -1031,7 +1041,8 @@ with fouling:
                     dp_star_before_kpa=fc_fit.current_kpa, baseline_repeatability_kpa=v_repeat,
                 )
                 st.session_state["verification"] = {
-                    "scenario": fc_scenario, "upstream": fc_upstream, "result": v_result,
+                    "scenario": fc_scenario, "upstream": fc_upstream, "maint_limit": fc_maint_limit,
+                    "result": v_result,
                     "dp_kpa": v_dp, "flow_lps": v_flow, "method": v_method,
                 }
             except ValueError as exc:
@@ -1039,8 +1050,9 @@ with fouling:
                 st.error("Reading not accepted — " + str(exc))
 
     verification = st.session_state.get("verification")
-    if verification and (verification["scenario"], verification["upstream"]) != (fc_scenario, fc_upstream):
-        verification = None  # belongs to a different forecast
+    if verification and (verification["scenario"], verification["upstream"], verification.get("maint_limit")) != (
+            fc_scenario, fc_upstream, fc_maint_limit):
+        verification = None  # computed for a different forecast or maintenance limit: re-verify
     verification_summary = None
     if verification:
         v_res = verification["result"]
@@ -1270,9 +1282,10 @@ with intelligence:
             "100 mm inlet · Lowara demo/reference pump at approximately 1450 rpm · water at 20 °C. "
             "Cleaning and resizing results are hypothetical and are not used in this current-condition diagnosis."
         )
-        st.caption("Filter reference: demo clean drop 5 kPa with illustrative ±2 kPa tolerance at the fixed design flow; not a field alarm threshold.")
+        st.caption("Strainer reference: demo clean drop 5 kPa with illustrative ±2 kPa tolerance at the fixed design flow; not a field alarm threshold. "
+                   "The post-maintenance check in Fouling forecast uses a band computed from instrument accuracy instead.")
         if not reveal:
-            st.info("Reveal pressure before the filter in Repair simulation to enable filter comparison. NPSH can still be calculated from the known demo suction pressure.")
+            st.info("Reveal pressure before the strainer in Repair simulation to enable strainer comparison. NPSH can still be calculated from the known demo suction pressure.")
     else:
         snapshot_q = actual_q
         snapshot_a = secondary_available
@@ -1286,20 +1299,20 @@ with intelligence:
             f"{secondary_diameter:g} mm inlet · water at 20 °C. Lowara curve is not used. "
             "Use individual-pump flow for NPSH and minimum-flow checks; set flow is valid only if it is also the flow through the evaluated pump."
         )
-        if st.checkbox("Paired secondary-filter pressures available for this snapshot", key="intel_filter_known"):
-            st.caption("Assumes the filter outlet is at the suction pressure entered in the secondary tab, with negligible intervening loss. Use simultaneous absolute readings.")
+        if st.checkbox("Paired secondary-strainer pressures available for this snapshot", key="intel_filter_known"):
+            st.caption("Assumes the strainer outlet is at the suction pressure entered in the secondary tab, with negligible intervening loss. Use simultaneous absolute readings.")
             filter_upstream = st.number_input(
-                "Secondary filter upstream absolute pressure (kPa)", min_value=0.1,
+                "Secondary strainer upstream absolute pressure (kPa)", min_value=0.1,
                 value=35.0, step=0.1, key="intel_filter_upstream",
             )
             snapshot_drop = filter_upstream - secondary_pressure
-            if st.checkbox("Clean-filter reference applies at this same flow and fluid condition", key="intel_clean_known"):
+            if st.checkbox("Clean-strainer reference applies at this same flow and fluid condition", key="intel_clean_known"):
                 snapshot_clean = st.number_input(
-                    "Clean-filter reference Δp (kPa)", min_value=0.0, value=5.0,
+                    "Clean-strainer reference Δp (kPa)", min_value=0.0, value=5.0,
                     step=0.1, key="intel_clean_drop",
                 )
                 snapshot_tolerance = st.number_input(
-                    "Engineer-selected filter comparison tolerance (kPa)", min_value=0.0,
+                    "Engineer-selected strainer comparison tolerance (kPa)", min_value=0.0,
                     value=2.0, step=0.1, key="intel_filter_tolerance",
                 )
                 st.caption("These are editable demo starting values. Replace them with a reference and tolerance for this operating condition.")
@@ -1324,7 +1337,7 @@ with intelligence:
     a_col, r_col, drop_col = st.columns(3)
     a_col.metric("Snapshot NPSHa", "Not assessed" if snapshot_problem else f"{snapshot_a:.2f} m")
     r_col.metric("Snapshot NPSHr", "Missing" if snapshot_r is None else f"{snapshot_r:.2f} m")
-    drop_col.metric("Strainer Δp* now (normalised)" if is_forecast else "Snapshot filter Δp",
+    drop_col.metric("Strainer Δp* now (normalised)" if is_forecast else "Snapshot strainer Δp",
                     "Missing" if snapshot_drop is None else f"{snapshot_drop:.2f} kPa")
     if is_forecast:
         reco = forecast_summary["recommendation"]
@@ -1338,7 +1351,7 @@ with intelligence:
             st.write(f"**Evidence:** {item['Evidence']}")
             st.write(f"**Next check:** {item['Next check']}")
     st.caption(
-        "No overall SAFE verdict is issued. NPSH margin, filter comparison and minimum flow are separate checks; "
+        "No overall SAFE verdict is issued. NPSH margin, strainer comparison and minimum flow are separate checks; "
         "missing data remain unassessed. Noise, vibration, temperature changes and other failure modes are outside this model. "
         "The separate 0.50 m Xylem/catalog allowance is not added to the engineer-required NPSH margin."
     )
@@ -1353,7 +1366,7 @@ with intelligence:
          f"Secondary inputs; speed {speed_pct}%; user-supplied NPSHr only; Lowara curve not used"),
         f"Flow: {snapshot_q:.2f} L/s; NPSHa: {snapshot_a:.4f} m; NPSHr: {snapshot_r}",
         f"Engineer-required NPSH margin: {engineer_margin:.2f} m",
-        f"Filter drop: {snapshot_drop}; clean reference: {snapshot_clean}; tolerance: {snapshot_tolerance} kPa",
+        f"Strainer drop: {snapshot_drop}; clean reference: {snapshot_clean}; tolerance: {snapshot_tolerance} kPa",
         f"Manufacturer minimum flow: {snapshot_min} L/s (None = missing)",
         "Assumptions: water at 20 C; absolute suction pressure at NPSH datum; no overall pump-health verdict.",
     ]
@@ -1399,16 +1412,18 @@ with intelligence:
         explanation_snapshot["cleaning_simulation"] = {
             "npsha_m": clean_head, "actual_margin_m": clean_actual,
             "surplus_m": clean_surplus, "status": clean_status,
-            "assumptions": "Hypothetical clean-filter loss 5 kPa; fixed flow and upstream pressure, unchanged 100 mm inlet; before any pipe resize.",
+            "assumptions": "Hypothetical clean-strainer loss 5 kPa; fixed flow and upstream pressure, unchanged 100 mm inlet; before any pipe resize.",
         }
     mode = st.radio(
         "Explanation service", ("OpenAI · AI explanation", "Offline · rule-based explanation"),
+        # Without a configured key, start on Offline so the button works on first click.
+        index=0 if os.environ.get("OPENAI_API_KEY", "").strip() else 1,
         key="explain_mode",
     )
     topic = st.selectbox(
         "Question", ((MAINTENANCE_TOPIC,) if is_forecast else ()) + (
             "Explain the current diagnosis", "Why is there NPSH risk?",
-            "Would cleaning the filter help?", "Which data are missing?"),
+            "Would cleaning the strainer help?", "Which data are missing?"),
         key="explain_topic",
     )
     use_ai = mode.startswith("OpenAI")

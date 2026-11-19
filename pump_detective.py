@@ -19,30 +19,30 @@ def diagnose_filter(pressure_before_kpa, pressure_after_kpa,
     """Return the pressure drop and a suggested check at the design flow.
 
     Both readings are absolute pressures (kPa abs) taken at the same flow.
-    ``normal_after_kpa`` is the expected pressure after the filter in normal
-    operation; it is only used once the filter drop matches the clean reference.
+    ``normal_after_kpa`` is the expected pressure after the strainer in normal
+    operation; it is only used once the strainer drop matches the clean reference.
     """
     if pressure_before_kpa is None:
-        return None, "Measure the pressure upstream of the filter."
+        return None, "Measure the pressure upstream of the strainer."
 
     pressure_drop_kpa = pressure_before_kpa - pressure_after_kpa
 
     if pressure_drop_kpa < 0:
         return pressure_drop_kpa, "Verify the pressure readings and flow direction."
     if pressure_drop_kpa > clean_drop_kpa + tolerance_kpa:
-        return pressure_drop_kpa, "Check the filter for restriction first."
+        return pressure_drop_kpa, "Check the strainer for restriction first."
     if pressure_drop_kpa < clean_drop_kpa - tolerance_kpa:
-        return pressure_drop_kpa, "Verify the flow and the clean-filter reference."
+        return pressure_drop_kpa, "Verify the flow and the clean-strainer reference."
     if pressure_after_kpa < normal_after_kpa - tolerance_kpa:
-        return pressure_drop_kpa, "Check pressure conditions upstream of the filter."
-    return pressure_drop_kpa, "Filter pressure drop matches the clean reference."
+        return pressure_drop_kpa, "Check pressure conditions upstream of the strainer."
+    return pressure_drop_kpa, "Strainer pressure drop matches the clean reference."
 
 
 def run_demo():
     """Show what the diagnosis does before and after the extra measurement."""
     cases = [
-        ("Clean filter", 110.0, 105.0),
-        ("Partially clogged filter", 110.0, 85.0),
+        ("Clean strainer", 110.0, 105.0),
+        ("Partially clogged strainer", 110.0, 85.0),
         ("Low upstream pressure", 90.0, 85.0),
         ("Missing upstream reading", None, 85.0),
     ]
