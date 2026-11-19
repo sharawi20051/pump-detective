@@ -25,7 +25,7 @@ Suggested track: **AI, Agentic Systems, Cybersecurity & Dev Tools** (AI integrat
 | 2:35–2:50 | *(Optional)* Note on the blue info box | "It also notes that suction is still below atmospheric in this low-pressure plant, a problem cleaning alone can't fix." |
 | 2:50–3:00 | Close on the chart | "Monitor, diagnose, predict, recommend, maintain, verify. Synthetic data and a published pump curve today; ready for real sensors." |
 
-Cuts if you run long: drop the optional 2:35 note first. If you have spare time, add the events table after the forecast table ("sensor glitches are detected and excluded, so they can't trigger false alarms").
+Cuts if you run long: drop the optional 2:35 note first. If you have 10 spare seconds, show **Upload my own sensor log** with `examples/example_sensor_log.csv` ("the same method runs on a real logger export; it even finds the cleaning on 22 October"). If you have spare time, add the events table after the forecast table ("sensor glitches are detected and excluded, so they can't trigger false alarms").
 
 ## Devpost checklist
 

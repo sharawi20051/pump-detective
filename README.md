@@ -14,7 +14,7 @@ MONITOR → DIAGNOSE → PREDICT → RECOMMEND → MAINTAIN → VERIFY
 
 | Step | What happens | Where |
 |---|---|---|
-| Monitor | 60-day hourly sensor log (synthetic): flow, pressure before the strainer, suction pressure | Fouling forecast |
+| Monitor | 60-day hourly sensor log (synthetic), or **your own CSV log**: flow, pressure before the strainer, suction pressure | Fouling forecast |
 | Diagnose | Flow-normalised strainer Δp; sensor glitches and debris events detected | Fouling forecast, Strainer diagnostics |
 | Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits, then checked with a backtest | Fouling forecast |
 | Recommend | Clean-by date and priority from deterministic rules; work order written by AI or offline | Fouling forecast, Detective Intelligence |
@@ -77,6 +77,29 @@ Every number, status, priority and date is computed in Python before the AI sees
 
    With 21 days hidden, the debris-slug forecast is made before the event and misses it (−42 %). A trend cannot predict a sudden event; that is why the method watches for step changes and refits.
 
+## Use your own sensor data
+
+In **Fouling forecast**, choose **Upload my own sensor log (CSV)**. The uploaded log goes through the same pipeline as the demo: flow normalisation, anomaly and step detection, trend, forecast, backtest, recommendation, work order and verification.
+
+| Column | Unit | |
+|---|---|---|
+| `timestamp` | e.g. `2026-11-01 14:15` | required |
+| `flow_lps` | L/s | required |
+| `pressure_before_kpa_abs` | kPa absolute, before the strainer | with `suction_kpa_abs` |
+| `suction_kpa_abs` | kPa absolute, at the pump suction | with `pressure_before_kpa_abs` |
+| `dp_kpa` | kPa, DP transmitter across the strainer | instead of the two pressures |
+
+- **What is accepted:** any logging interval (readings are averaged to hourly values), gaps, and pump stops (flow 0). At least 15 days of data are needed.
+- **Cleanings:** a cleaning in the log is detected as a sudden drop, and the trend restarts after the last one.
+- **Pressure for the NPSH limits:** the pressure before the strainer is taken as the median of the last 7 days. If the file has only `dp_kpa`, you enter it.
+- **Rejected files:** missing columns, unreadable files, logs that are too short, gauge (negative) pressures, swapped pressure taps and flows that look like m³/h are rejected with a message saying what to fix.
+- **Dates:** forecast dates count from the last reading in the file.
+- **Privacy:** the file is analysed in memory and not saved.
+
+`examples/example_sensor_log.csv` is a **synthetic** 40-day log in this format, with 15-minute readings, a strainer cleaning on 22 Oct, a 10-hour logger outage and two transmitter glitches. `examples/make_example_log.py` recreates it. The app's **Download** button also produces a log in this format, so a downloaded demo log can be uploaded again.
+
+The app cannot confirm that an uploaded log comes from this plant, or that its pressures are absolute. The data origin is shown on screen, in the report and to the AI.
+
 ## Maintenance verification (`verification.py`)
 
 - One post-cleaning Δp reading **and the flow at that moment**, flow-normalised. A low-flow reading cannot pass as clean.
@@ -121,7 +144,7 @@ py -m streamlit run app.py
 
 ## Tests
 
-51 unit tests cover the NPSH physics (checked against hand calculations and the demo values), the forecast and its backtest, flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
+67 unit tests cover the NPSH physics (checked against hand calculations and the demo values), the forecast and its backtest, CSV upload (format, cleanings, rejected files, round trip), flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
 
 ```bash
 py -m unittest discover tests
@@ -129,7 +152,7 @@ py -m unittest discover tests
 
 ## Future work
 
-Real sensor ingestion, alerts, multiple pumps, a forecast range that includes level uncertainty, a phone app for technicians to receive work orders and submit the post-cleaning reading, and an automated check of AI wording against the calculated numbers.
+Live sensor ingestion (BMS / historian connection instead of CSV files), alerts, multiple pumps, a forecast range that includes level uncertainty, a phone app for technicians to receive work orders and submit the post-cleaning reading, and an automated check of AI wording against the calculated numbers.
 
 ## Tools
 

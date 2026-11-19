@@ -12,6 +12,7 @@ reference flow, Δp* = Δp · (Q_ref / Q)², removes the flow effect and leaves 
 change in K, which is the fouling signal we trend.
 """
 
+import warnings
 from dataclasses import dataclass
 from math import log
 
@@ -127,6 +128,20 @@ def find_steps(daily_median, min_jump_kpa=1.5):
     return [d for i, d in enumerate(steps) if i == 0 or d - steps[i - 1] > 1]
 
 
+def find_drops(daily_median, min_drop_kpa=1.5):
+    """Day indices where the daily median falls sharply: usually a strainer cleaning.
+
+    The mirror image of ``find_steps``. Real logs contain cleanings; the trend
+    must restart after the most recent one, exactly as it does after a debris slug.
+    """
+    return find_steps(-np.asarray(daily_median, dtype=float), min_jump_kpa=min_drop_kpa)
+
+
+def regime_changes(daily_median):
+    """All step increases and sudden drops, sorted: the trend restarts after the last one."""
+    return sorted(set(find_steps(daily_median)) | set(find_drops(daily_median)))
+
+
 @dataclass
 class TrendFit:
     start_day: int        # first day used in the fit
@@ -214,7 +229,7 @@ def backtest(daily_median, horizon_days=14, max_window_days=21, min_days=5):
     if horizon_days < 1 or n_train < min_days + 3:
         raise ValueError("Not enough history for a backtest of this length.")
     train = m[:n_train]
-    steps = find_steps(train)
+    steps = regime_changes(train)
     fit = fit_trend(train, max_window_days=max_window_days, min_days=min_days, steps=steps)
     h = np.arange(1, horizon_days + 1, dtype=float)
     predicted = fit.current_kpa * np.exp(fit.rate_per_day * h)
@@ -222,12 +237,136 @@ def backtest(daily_median, horizon_days=14, max_window_days=21, min_days=5):
     low, high = predicted * np.exp(-half_width), predicted * np.exp(half_width)
     actual = m[n_train:]
     ok = np.isfinite(actual)
+    if not ok.any():
+        raise ValueError("No valid readings in the hidden days.")
+    last = np.flatnonzero(ok)[-1]
     err = (predicted[ok] - actual[ok]) / actual[ok]
     inside = (actual[ok] >= low[ok]) & (actual[ok] <= high[ok])
     return Backtest(
         n_train, horizon_days, fit, predicted, low, high, actual,
         mape_pct=float(100 * np.mean(np.abs(err))),
-        end_error_pct=float(100 * (predicted[-1] - actual[-1]) / actual[-1]),
+        end_error_pct=float(100 * (predicted[last] - actual[last]) / actual[last]),
         coverage_pct=float(100 * np.mean(inside)),
         recent_step=bool(steps) and max(steps) > n_train - min_days,
     )
+
+
+# --- Uploaded sensor logs ------------------------------------------------------
+
+class SensorLogError(ValueError):
+    """A sensor log that cannot be analysed; the message is safe to show to the user."""
+
+
+# Accepted column names (case-insensitive). The first name is the documented one.
+CSV_COLUMNS = {
+    "timestamp": ("timestamp", "time", "datetime", "date_time"),
+    "flow_lps": ("flow_lps",),
+    "pressure_before_kpa_abs": ("pressure_before_kpa_abs", "upstream_kpa_abs"),
+    "suction_kpa_abs": ("suction_kpa_abs",),
+    "dp_kpa": ("dp_kpa", "strainer_dp_kpa"),
+}
+MIN_UPLOAD_DAYS = 15  # 8 days to fit + 7 hidden for the shortest backtest
+
+
+def load_sensor_csv(source, q_ref_lps, min_days=MIN_UPLOAD_DAYS):
+    """Read a user's strainer sensor log and return (log, info).
+
+    Required columns: ``timestamp`` and ``flow_lps`` (L/s), plus either both
+    ``pressure_before_kpa_abs`` and ``suction_kpa_abs`` (kPa abs) or ``dp_kpa``
+    from a differential transmitter. Any logging interval works: readings are
+    averaged to hourly values, so the result has the same shape as
+    ``generate_sensor_log`` and goes through the same analysis. Days are counted
+    from midnight of the first day. Rows with an unreadable time are dropped;
+    non-numeric or non-positive flows (pump stopped) become gaps.
+    """
+    try:
+        raw = pd.read_csv(source)
+    except Exception:  # noqa: BLE001 - any parser failure gets the same friendly message
+        raise SensorLogError("The file could not be read as CSV. Save it as comma-separated text with a header row.")
+    names = {str(c).strip().lower(): c for c in raw.columns}
+
+    def column(key):
+        for alias in CSV_COLUMNS[key]:
+            if alias in names:
+                return raw[names[alias]]
+        return None
+
+    ts, flow = column("timestamp"), column("flow_lps")
+    before, suction, dp = column("pressure_before_kpa_abs"), column("suction_kpa_abs"), column("dp_kpa")
+    missing = [k for k, v in (("timestamp", ts), ("flow_lps", flow)) if v is None]
+    if dp is None and (before is None or suction is None):
+        missing.append("pressure_before_kpa_abs + suction_kpa_abs (or dp_kpa)")
+    if missing:
+        raise SensorLogError("Missing column(s): " + ", ".join(missing) + ". See the expected format below.")
+
+    with warnings.catch_warnings():  # mixed or unusual date formats are parsed row by row; that is fine
+        warnings.simplefilter("ignore", UserWarning)
+        times = pd.to_datetime(ts, errors="coerce")
+    if getattr(times.dt, "tz", None) is not None:
+        times = times.dt.tz_localize(None)  # keep the local clock time the logger wrote
+
+    def numeric(series):
+        return pd.to_numeric(series, errors="coerce") if series is not None else pd.Series(np.nan, index=raw.index)
+
+    df = pd.DataFrame({"t": times, "flow_lps": numeric(flow), "before": numeric(before),
+                       "suction": numeric(suction), "dp": numeric(dp)})
+    if dp is None:
+        df["dp"] = df["before"] - df["suction"]
+    bad_times = int(df["t"].isna().sum())
+    df = df.dropna(subset=["t"]).sort_values("t").drop_duplicates("t")
+    if df.empty:
+        raise SensorLogError("No readable timestamps. Use a format such as 2026-11-01 14:00.")
+    df.loc[~(df["flow_lps"] > 0), "flow_lps"] = np.nan
+
+    hourly = df.set_index("t")[["flow_lps", "before", "suction", "dp"]].resample("1h").mean()
+    start = hourly.index[0].normalize()
+    hours = ((hourly.index - start) / pd.Timedelta(hours=1)).to_numpy().astype(int)
+    span_days = int(hours[-1] // HOURS_PER_DAY) + 1
+    if span_days < min_days:
+        raise SensorLogError(f"The log covers {span_days} day(s); at least {min_days} days are needed for a trend "
+                             "and a backtest.")
+    usable = hourly["dp"].notna() & hourly["flow_lps"].notna()
+    if usable.sum() < min_days * HOURS_PER_DAY * 0.5:
+        raise SensorLogError("Too few hours have both a pressure drop and a flow reading to fit a trend.")
+
+    med_dp, med_flow = float(hourly["dp"].median()), float(hourly["flow_lps"].median())
+    if med_dp <= 0:
+        raise SensorLogError("The strainer pressure drop is zero or negative on most readings. Check that the "
+                             "pressure columns are not swapped.")
+    notes = []
+    med_before = float(hourly["before"].median()) if hourly["before"].notna().any() else None
+    if med_before is not None and med_before <= 0:
+        raise SensorLogError("Pressure before the strainer must be absolute (kPa abs, always positive). If the "
+                             "logger records gauge pressure, add the local atmospheric pressure (about 101.3 kPa).")
+    if med_before is not None and med_before > 2000:
+        notes.append(f"Pressure before the strainer is about {med_before:,.0f}: is it in Pa rather than kPa?")
+    if med_dp > 100:
+        notes.append(f"Strainer Δp is about {med_dp:.0f} kPa, very high for a strainer: check the units.")
+    if med_flow > 2 * q_ref_lps:
+        raise SensorLogError(f"Typical flow is {med_flow:.1f}, more than twice the {q_ref_lps:g} L/s design flow, "
+                             "so the flow correction would be meaningless. Is the column in m³/h? Convert to L/s "
+                             "(divide by 3.6).")
+    if med_flow < 0.3 * q_ref_lps:
+        notes.append(f"Typical flow is {med_flow:.1f} L/s, below 30 % of design flow; most readings will be "
+                        "excluded from the flow normalisation.")
+    gap_hours = int((~usable).sum())
+    if gap_hours > 0.2 * len(hourly):
+        notes.append(f"{gap_hours} of {len(hourly)} hours have no usable reading.")
+
+    last_week = hourly["before"][hourly.index >= hourly.index[-1] - pd.Timedelta(days=7)]
+    log = pd.DataFrame({
+        "hour": hours, "day": hours / HOURS_PER_DAY, "flow_lps": hourly["flow_lps"].to_numpy(),
+        "upstream_kpa_abs": hourly["before"].to_numpy(), "suction_kpa_abs": hourly["suction"].to_numpy(),
+        "dp_kpa": hourly["dp"].to_numpy(),
+    })
+    steps = df["t"].diff().dropna()
+    info = {
+        "first_reading": df["t"].iloc[0], "last_reading": df["t"].iloc[-1], "start_midnight": start,
+        "days": span_days, "rows_read": int(len(raw)), "rows_bad_time": bad_times,
+        "interval_minutes": float(steps.median() / pd.Timedelta(minutes=1)) if len(steps) else None,
+        "hours_without_data": gap_hours,
+        "pressure_before_last_7d_kpa_abs": float(last_week.median()) if last_week.notna().any() else None,
+        "has_absolute_pressures": med_before is not None,
+        "warnings": notes,
+    }
+    return log, info
