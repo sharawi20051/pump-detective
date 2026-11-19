@@ -16,7 +16,7 @@ MONITOR → DIAGNOSE → PREDICT → RECOMMEND → MAINTAIN → VERIFY
 |---|---|---|
 | Monitor | 60-day hourly sensor log (synthetic): flow, pressure before the strainer, suction pressure | Fouling forecast |
 | Diagnose | Flow-normalised strainer Δp; sensor glitches and debris events detected | Fouling forecast, Strainer diagnostics |
-| Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits | Fouling forecast |
+| Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits, then checked with a backtest | Fouling forecast |
 | Recommend | Clean-by date and priority from deterministic rules; work order written by AI or offline | Fouling forecast, Detective Intelligence |
 | Maintain | Technician cleans the strainer and records one Δp reading and the flow | Verify the maintenance form |
 | Verify | RESTORED / IMPROVED, NOT CLEAN / NOT EFFECTIVE / SUSPICIOUSLY LOW, plus NPSH after cleaning | Fouling forecast |
@@ -24,7 +24,7 @@ MONITOR → DIAGNOSE → PREDICT → RECOMMEND → MAINTAIN → VERIFY
 ## Architecture: Python decides, AI explains
 
 ```
-Engineering calculations (NPSHa, NPSHr, margin, Q² normalisation)   app.py, pump_detective.py
+Engineering calculations (NPSHa, NPSHr, margin, Q² normalisation)   npsh.py, pump_detective.py
         ↓
 Statistical forecast (trend, anomalies, time to limit)               forecast.py
         ↓
@@ -62,10 +62,20 @@ Every number, status, priority and date is computed in Python before the AI sees
 
 ## Predictive method (`forecast.py`)
 
-1. **Synthetic log:** daily load cycle and chiller staging, sensor noise, injected sensor glitches. Three scenarios: gradual fouling, a debris slug on day 45, and a stable strainer.
+1. **Synthetic log:** daily load cycle and chiller staging, sensor noise, injected sensor glitches. Four scenarios: gradual fouling, a debris slug on day 45, a stable strainer, and linear fouling, which deliberately does not follow the exponential model the forecast fits.
 2. **Anomalies:** isolated outliers (robust z-score above 6 against a 25-hour rolling median) are excluded. A jump of more than 1.5 kPa in the daily median is a step change, and the trend is refitted from that day.
 3. **Trend:** ln(Δp*) is fitted linearly against time on recent daily medians (exponential fouling), with a 95 % range on the rate.
 4. **Forecast:** days until each limit; the recommendation uses the earliest estimate, plus whether cleaning alone can restore the margin.
+5. **Backtest:** the last 7, 14 or 21 days are hidden, the same pipeline (step detection included) is run on the earlier days, and its forecast is compared with what the sensors then showed. The app reports the error on the last hidden day, the mean absolute error and how many hidden days fall inside the 95 % range (rate uncertainty plus day-to-day scatter). With 14 days hidden:
+
+   | Scenario | Error after 14 days | Mean absolute error |
+   |---|---|---|
+   | Gradual fouling | +1.2 % | 2.8 % |
+   | Linear fouling (model mismatch) | −0.6 % | 2.7 % |
+   | Stable strainer | +1.2 % | 2.9 % |
+   | Debris slug | not meaningful: the step change falls on the last training day, and the app says so |
+
+   With 21 days hidden, the debris-slug forecast is made before the event and misses it (−42 %). A trend cannot predict a sudden event; that is why the method watches for step changes and refits.
 
 ## Maintenance verification (`verification.py`)
 
@@ -92,6 +102,7 @@ Detective Intelligence opens on the Fouling forecast snapshot. Ask **"What maint
 - All sensor data are synthetic. The pump curve is a published reference read by eye, not the installed pump's.
 - The demo plant is a **low-pressure rooftop plant** (33 kPa abs before the strainer), so suction is below atmospheric. With this pump's low NPSHr, strainer fouling only threatens the NPSH margin at such low pressures; the app flags the low suction separately.
 - The forecast range reflects uncertainty in the fouling **rate** only. Real fouling can accelerate or stop; re-run the forecast as data arrive.
+- The backtest scores the method on the same synthetic log. It shows the method behaves sensibly, not how accurate it would be in the field.
 - Anomaly thresholds, the 5 kPa clean baseline, the 20 kPa maintenance limit and the instrument accuracies are example values.
 - The diagnosis tabs use an illustrative ±2 kPa tolerance. Verification uses the instrument-based band instead.
 - NPSH after cleaning assumes the pressure before the strainer is unchanged. Water properties are taken at 20 °C.
@@ -110,7 +121,7 @@ py -m streamlit run app.py
 
 ## Tests
 
-32 unit tests cover the forecast, flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
+51 unit tests cover the NPSH physics (checked against hand calculations and the demo values), the forecast and its backtest, flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
 
 ```bash
 py -m unittest discover tests
@@ -118,7 +129,7 @@ py -m unittest discover tests
 
 ## Future work
 
-Real sensor ingestion, alerts, multiple pumps, a forecast range that includes level uncertainty, and an automated check of AI wording against the calculated numbers. A technician work-order app (Momen) was prototyped but **not integrated**; see `docs/MOMEN_PLAN.md`.
+Real sensor ingestion, alerts, multiple pumps, a forecast range that includes level uncertainty, a phone app for technicians to receive work orders and submit the post-cleaning reading, and an automated check of AI wording against the calculated numbers.
 
 ## Tools
 

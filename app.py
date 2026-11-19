@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from datetime import date, datetime, time, timedelta
-from math import isclose, isfinite, pi
+from math import isfinite
 
 import altair as alt
 import numpy as np
@@ -16,6 +16,12 @@ import streamlit as st
 
 import forecast as fc
 import verification as vf
+from npsh import (
+    CATALOG_ALLOWANCE_M, GRAVITY_M_S2, LOWARA_CURVE, LOWARA_SUCTION_NOZZLE_MM,
+    MAX_PLAUSIBLE_SUCTION_VELOCITY_M_S, WATER_DENSITY_KG_M3, WATER_VAPOR_PRESSURE_KPA,
+    available_npsh, lowara_npshr, npsh_assessment, npsha_input_problem, pressure_for_npsha,
+    straight_pipe_loss_kpa, suction_velocity,
+)
 
 from pump_detective import (
     ATMOSPHERIC_KPA_ABS, CLEAN_FILTER_DROP_KPA, DESIGN_FLOW_LPS, NORMAL_SUCTION_KPA_ABS,
@@ -29,89 +35,6 @@ SCENARIOS = {
     "Case B · Low downstream pressure": (90.0, 85.0),
     "Clean strainer · Reference case": (110.0, 105.0),
 }
-
-
-# Approximate readings from the Lowara NSC 80-200/55 curve, p. 100, 1450 rpm.
-# Each pair is (flow in m³/h, laboratory NPSH in m).
-LOWARA_CURVE = ((40, 1.07), (60, 1.04), (80, 1.06), (100, 1.19), (120, 1.51), (140, 2.21))
-CATALOG_ALLOWANCE_M = 0.5
-WATER_VAPOR_PRESSURE_KPA = 2.339  # Water at 20 °C
-WATER_DENSITY_KG_M3 = 998.2
-GRAVITY_M_S2 = 9.80665
-# Lowara NSC 80-200 suction flange is DN100; the NPSH datum reading is taken there.
-LOWARA_SUCTION_NOZZLE_MM = 100
-# Above this velocity a suction reading is treated as implausible (typical suction
-# nozzle velocities are roughly 1-4 m/s). Illustrative plausibility check only.
-MAX_PLAUSIBLE_SUCTION_VELOCITY_M_S = 5.0
-
-
-def suction_velocity(flow_m3_h, diameter_mm):
-    area_m2 = pi * (diameter_mm / 1000) ** 2 / 4
-    return (flow_m3_h / 3600) / area_m2
-
-
-def npsha_input_problem(pressure_abs_kpa, flow_m3_h, diameter_mm):
-    """Return a message when the inputs cannot give a meaningful NPSHa, else None."""
-    if pressure_abs_kpa <= WATER_VAPOR_PRESSURE_KPA:
-        return (f"Suction pressure {pressure_abs_kpa:.2f} kPa abs is at or below the vapour pressure "
-                f"of water at 20 °C ({WATER_VAPOR_PRESSURE_KPA} kPa). The water would already be boiling; "
-                "check the reading, units (absolute vs gauge) and sensor before assessing NPSH.")
-    velocity = suction_velocity(flow_m3_h, diameter_mm)
-    if velocity > MAX_PLAUSIBLE_SUCTION_VELOCITY_M_S:
-        return (f"Velocity at the measurement point would be {velocity:.1f} m/s, above the "
-                f"{MAX_PLAUSIBLE_SUCTION_VELOCITY_M_S:g} m/s plausibility limit. Check the internal diameter "
-                "and flow. A smaller pipe does not add NPSH: for the same upstream conditions it lowers "
-                "static pressure.")
-    return None
-
-
-def lowara_npshr(flow_m3_h):
-    """Interpolate between catalog points within the demo's flow range."""
-    for (flow_a, head_a), (flow_b, head_b) in zip(LOWARA_CURVE, LOWARA_CURVE[1:]):
-        if flow_a <= flow_m3_h <= flow_b:
-            fraction = (flow_m3_h - flow_a) / (flow_b - flow_a)
-            return head_a + fraction * (head_b - head_a)
-    raise ValueError("Flow is outside the digitized curve range.")
-
-
-def available_npsh(pressure_abs_kpa, flow_m3_h, diameter_mm):
-    """Estimate NPSHa from static pressure at the suction nozzle at the datum."""
-    velocity_m_s = suction_velocity(flow_m3_h, diameter_mm)
-    pressure_head = (pressure_abs_kpa - WATER_VAPOR_PRESSURE_KPA) * 1000
-    return pressure_head / (WATER_DENSITY_KG_M3 * GRAVITY_M_S2) + velocity_m_s**2 / (
-        2 * GRAVITY_M_S2
-    )
-
-
-def pressure_for_npsha(target_npsha_m, flow_m3_h, diameter_mm):
-    """Absolute static pressure (kPa abs) at the datum that gives the target NPSHa."""
-    velocity_head = suction_velocity(flow_m3_h, diameter_mm) ** 2 / (2 * GRAVITY_M_S2)
-    return (target_npsha_m - velocity_head) * WATER_DENSITY_KG_M3 * GRAVITY_M_S2 / 1000 + WATER_VAPOR_PRESSURE_KPA
-
-
-def straight_pipe_loss_kpa(flow_m3_h, diameter_mm, length_m, friction_factor):
-    """Return the Darcy–Weisbach pressure loss for a straight pipe segment."""
-    diameter_m = diameter_mm / 1000
-    area_m2 = pi * diameter_m**2 / 4
-    velocity_m_s = flow_m3_h / (3600 * area_m2)
-    return friction_factor * (length_m / diameter_m) * WATER_DENSITY_KG_M3 * velocity_m_s**2 / 2000
-
-
-def npsh_assessment(available, required, required_margin):
-    """Compare raw NPSHr with an independently selected additive margin."""
-    if not all(isfinite(v) for v in (available, required, required_margin)):
-        raise ValueError("NPSH inputs must be finite.")
-    if required < 0 or required_margin < 0:
-        raise ValueError("NPSHr and required margin must be nonnegative.")
-    actual_margin = available - required
-    surplus = actual_margin - required_margin
-    # Avoid a false deficit at a floating-point equality boundary.
-    if isclose(actual_margin, 0.0, abs_tol=1e-9):
-        actual_margin = 0.0
-    if isclose(surplus, 0.0, abs_tol=1e-9):
-        surplus = 0.0
-    status = "CRITICAL" if actual_margin < 0 else "WARNING" if surplus < 0 else "SAFE"
-    return actual_margin, surplus, status
 
 
 def show_npsh_assessment(available, required, required_margin, demo_curve=True):
@@ -370,7 +293,17 @@ def offline_work_order(snapshot):
         ])
         if ver["suction_after_kpa_abs"] < ATMOSPHERIC_KPA_ABS:
             lines.append("- Suction is still below atmospheric pressure: system pressure must also be restored.")
-    lines.extend(["", f"Confidence: {forecast['data_origin']}. {forecast['uncertainty_note']}"])
+    confidence = f"Confidence: {forecast['data_origin']}. {forecast['uncertainty_note']}"
+    bt = forecast.get("backtest")
+    if bt:
+        if bt["step_change_too_recent_for_past_forecast"]:
+            confidence += (f" Backtest ({bt['days_hidden']} days hidden): a step change was too recent for a reliable "
+                           "past trend, so treat dates with extra caution.")
+        else:
+            confidence += (f" Backtest ({bt['days_hidden']} days hidden): the past forecast was off by "
+                           f"{bt['error_on_last_hidden_day_pct']:+.1f} % on the last day "
+                           f"(mean absolute error {bt['mean_absolute_error_pct']:.1f} %).")
+    lines.extend(["", confidence])
     return "\n".join(lines)
 
 
@@ -402,6 +335,8 @@ If forecast.post_maintenance_verification is present, report its strainer_verdic
 and NPSH status exactly; never upgrade a verdict. RESTORED means the strainer reading is within
 the measurement uncertainty of the clean baseline, not that the pump or system is healthy.
 SUSPICIOUSLY LOW must be reported as a possible damaged screen, bypass or sensor problem.
+If forecast.backtest is present, use its figures in Confidence exactly as given; it scores the
+method on the same synthetic log, not field performance.
 """
 
 
@@ -969,6 +904,71 @@ with fouling:
         "(after the most recent step change, at most 21 days)."
     )
 
+    # --- Backtest -------------------------------------------------------------------
+    st.subheader("Would this forecast have worked? (backtest)")
+    st.write(
+        "Hide the most recent days of the log, run exactly the same method on what is left, and compare its "
+        "forecast with what the sensors then showed."
+    )
+    fc_bt_horizon = st.select_slider(
+        "Days hidden from the forecast", options=[7, 14, 21], value=14, key="fc_bt_horizon",
+        help="The past forecast sees only the earlier days, including its own step and spike detection.",
+    )
+    fc_bt = fc.backtest(fc_daily, horizon_days=fc_bt_horizon)
+    bt1, bt2, bt3 = st.columns(3)
+    bt1.metric(f"Error after {fc_bt_horizon} days", f"{fc_bt.end_error_pct:+.1f} %",
+               help="(forecast − observed) / observed Δp* on the last hidden day. Positive = forecast was cautious.")
+    bt2.metric("Mean absolute error", f"{fc_bt.mape_pct:.1f} %", help="Averaged over every hidden day.")
+    bt3.metric("Days inside the 95 % range", f"{fc_bt.coverage_pct:.0f} %",
+               help="The range combines the uncertainty of the fitted rate with day-to-day scatter.")
+    fc_bt_from = fc_bt.train_days - 1
+    if fc_bt.recent_step:
+        st.warning(
+            "A step change was detected in the last few days before the past forecast was made, so too few days "
+            "followed the event to fit a reliable trend. In live use this case is an immediate clean-now alert, not a date."
+        )
+    elif fc_steps and min(fc_steps) > fc_bt_from:
+        st.warning(
+            f"The sudden event on {fc_day_to_date(min(fc_steps)):%d %b} happened after the past forecast was made, "
+            "and no trend can predict it. This is why the method watches for step changes and re-fits as data arrive."
+        )
+    elif abs(fc_bt.end_error_pct) <= 10:
+        st.success(
+            f"A forecast made on {fc_day_to_date(fc_bt_from):%d %b} predicted today's strainer Δp* within "
+            f"{abs(fc_bt.end_error_pct):.0f} %."
+        )
+    fc_bt_past = pd.DataFrame({
+        "time": [datetime.combine(fc_day_to_date(d), time(12)) for d in range(len(fc_daily))],
+        "Δp*": fc_daily, "Series": ["Seen by the past forecast" if d <= fc_bt_from else "Hidden (observed later)"
+                                    for d in range(len(fc_daily))],
+    })
+    fc_bt_proj = pd.DataFrame({
+        "time": [datetime.combine(fc_day_to_date(fc_bt_from + d), time(12)) for d in range(1, fc_bt_horizon + 1)],
+        "forecast": fc_bt.predicted, "low": fc_bt.low, "high": fc_bt.high,
+    })
+    bt_y = alt.Scale(zero=False)
+    bt_chart = alt.layer(
+        alt.Chart(fc_bt_proj).mark_area(opacity=0.18, color="#e07b00").encode(
+            x=alt.X("time:T", title=None), y=alt.Y("low:Q", scale=bt_y, title="Daily Δp* (kPa)"), y2="high:Q"),
+        alt.Chart(fc_bt_past).mark_line(point=alt.OverlayMarkDef(size=18)).encode(
+            x="time:T", y=alt.Y("Δp*:Q", scale=bt_y),
+            color=alt.Color("Series:N", scale=alt.Scale(
+                domain=["Seen by the past forecast", "Hidden (observed later)"], range=["#1f6fb2", "#111827"]),
+                legend=alt.Legend(orient="bottom", title=None, columns=2)),
+            tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("Δp*:Q", format=".2f"), "Series:N"]),
+        alt.Chart(fc_bt_proj).mark_line(strokeDash=[6, 4], color="#e07b00").encode(
+            x="time:T", y=alt.Y("forecast:Q", scale=bt_y),
+            tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("forecast:Q", title="Past forecast (kPa)", format=".2f")]),
+        alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_day_to_date(fc_bt_from), time(23, 59))]})).mark_rule(
+            color="#444", strokeDash=[2, 2]).encode(x="time:T"),
+    ).properties(height=280)
+    st.altair_chart(bt_chart, width="stretch")
+    st.caption(
+        "Dotted vertical line: the day the past forecast was made. Orange: what it predicted, with its 95 % range. "
+        "Black: what the (synthetic) sensors then showed. Try **Linear fouling (model mismatch)**: the data do not "
+        "follow the exponential model, yet the two-week forecast stays close."
+    )
+
     with st.expander("How the forecast works and what it assumes"):
         st.markdown(
             "1. **Normalise for flow.** Strainer loss follows Δp = K·Q², so every hourly reading is converted to the "
@@ -1114,6 +1114,14 @@ with fouling:
         "thresholds": fc_limit_rows,
         "recommendation": fc_reco,
         "events": [{"date": e["When"], "type": e["Type"], "evidence": e["Evidence"]} for e in fc_events],
+        "backtest": {
+            "days_hidden": fc_bt_horizon,
+            "error_on_last_hidden_day_pct": round(fc_bt.end_error_pct, 1),
+            "mean_absolute_error_pct": round(fc_bt.mape_pct, 1),
+            "days_inside_95pct_range_pct": round(fc_bt.coverage_pct, 0),
+            "step_change_too_recent_for_past_forecast": fc_bt.recent_step,
+            "note": "Backtest on the same synthetic log; it scores the method, not field performance.",
+        },
         "uncertainty_note": "Day ranges come from the trend fit's statistical uncertainty only; fouling can accelerate or stop.",
         "post_maintenance_verification": verification_summary,
     }

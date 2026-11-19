@@ -62,6 +62,41 @@ class ScenarioTests(unittest.TestCase):
         self.assertIsNone(fc.days_to_limit(fit.current_kpa, fit.rate_per_day, 20.0))
 
 
+class BacktestTests(unittest.TestCase):
+    """Hide the last days of the log, forecast them with the same pipeline, and score."""
+
+    def test_gradual_fouling_forecast_is_accurate(self):
+        *_, daily, _, _ = analyse("Gradual fouling")
+        bt = fc.backtest(daily, horizon_days=14)
+        self.assertLess(bt.mape_pct, 10.0)
+        self.assertGreaterEqual(bt.coverage_pct, 80.0)
+        self.assertEqual(bt.train_days, daily.size - 14)
+
+    def test_model_mismatch_still_close(self):
+        # Linear fouling, exponential fit: over two weeks the error stays small.
+        *_, daily, _, _ = analyse("Linear fouling (model mismatch)")
+        self.assertLess(fc.backtest(daily, horizon_days=14).mape_pct, 10.0)
+
+    def test_sudden_event_is_not_predicted(self):
+        # A forecast made before the day-45 debris slug cannot see it coming.
+        *_, daily, _, _ = analyse("Debris slug")
+        bt = fc.backtest(daily, horizon_days=21)
+        self.assertLess(bt.end_error_pct, -20.0)
+        self.assertFalse(bt.recent_step)
+
+    def test_step_at_end_of_training_is_flagged(self):
+        *_, daily, _, _ = analyse("Debris slug")
+        self.assertTrue(fc.backtest(daily, horizon_days=14).recent_step)
+
+    def test_fit_reports_day_to_day_scatter(self):
+        *_, fit = analyse("Gradual fouling")
+        self.assertGreater(fit.resid_sd, 0.0)
+
+    def test_horizon_too_long(self):
+        with self.assertRaises(ValueError):
+            fc.backtest(np.full(10, 5.0), horizon_days=8)
+
+
 class DaysToLimitTests(unittest.TestCase):
     def test_already_reached(self):
         self.assertEqual(fc.days_to_limit(15.0, 0.01, 10.0), 0.0)
