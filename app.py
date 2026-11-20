@@ -16,6 +16,9 @@ import pandas as pd
 import streamlit as st
 
 import forecast as fc
+import reports
+import ui
+import visuals
 import verification as vf
 from npsh import (
     CATALOG_ALLOWANCE_M, GRAVITY_M_S2, LOWARA_CURVE, LOWARA_SUCTION_NOZZLE_MM,
@@ -38,21 +41,51 @@ SCENARIOS = {
 }
 
 
+NPSH_TOOLTIP = ("NPSH = pressure head at the pump inlet above the point where water boils. Below the pump's NPSHr "
+                "the water flashes to vapour bubbles (cavitation), which erodes the impeller.")
+
+
 def show_npsh_assessment(available, required, required_margin, demo_curve=True):
+    """NPSH result as four coloured cards: status, available, required, margin against the target."""
     actual, surplus, status = npsh_assessment(available, required, required_margin)
-    a, r, m = st.columns(3)
-    a.metric("NPSHa · available", f"{available:.2f} m")
-    r.metric("NPSHr · demo curve (approx.)" if demo_curve else "NPSHr · user-supplied pump curve", f"{required:.2f} m")
-    m.metric("Actual margin · NPSHa − NPSHr", f"{actual:+.2f} m")
-    target, balance = st.columns(2)
-    target.metric("Engineer-required margin", f"{required_margin:.2f} m")
-    balance.metric("Margin surplus (+) / deficit (−)", f"{surplus:+.2f} m")
-    if status == "CRITICAL":
-        st.error("CRITICAL — NPSHa is below the selected NPSHr value.")
-    elif status == "WARNING":
-        st.warning("WARNING — NPSHa meets NPSHr, but the selected required margin is not met.")
-    else:
-        st.success("SAFE — the selected NPSH margin criterion is met for these inputs.")
+    meaning = {"SAFE": "target margin met", "WARNING": "above NPSHr, below the target margin",
+               "CRITICAL": "below NPSHr: cavitation expected"}[status]
+    ui.status_cards([
+        ("NPSH status", status, meaning, status, NPSH_TOOLTIP),
+        ("NPSH available", f"{available:.2f} m", "what the system supplies", "PLANNED"),
+        ("NPSH required", f"{required:.2f} m", "Lowara demo curve (approx.)" if demo_curve else "your pump's curve",
+         "PLANNED"),
+        ("Margin vs target", f"{surplus:+.2f} m", f"actual {actual:+.2f} m · target {required_margin:.2f} m", status),
+    ])
+
+
+# Strainer verdict for the diagram; mirrors pump_detective.diagnose_filter.
+VERDICT_TEXT = {"unknown": "Unknown", "restricted": "Strainer blocked", "low_drop": "Check reference",
+                "upstream": "Problem upstream", "ok": "Normal", "invalid": "Check readings"}
+VERDICT_KEY = {"unknown": "NOT ASSESSED", "restricted": "CRITICAL", "low_drop": "WARNING",
+               "upstream": "WARNING", "ok": "SAFE", "invalid": "NOT ASSESSED"}
+
+
+def strainer_verdict(before, after, clean=CLEAN_FILTER_DROP_KPA, tolerance=TOLERANCE_KPA,
+                     normal_after=NORMAL_SUCTION_KPA_ABS):
+    if before is None:
+        return "unknown"
+    drop = before - after
+    if drop < 0:
+        return "invalid"
+    if drop > clean + tolerance:
+        return "restricted"
+    if drop < clean - tolerance:
+        return "low_drop"
+    if after < normal_after - tolerance:
+        return "upstream"
+    return "ok"
+
+
+def verdict_alert(verdict, suggestion):
+    show = {"restricted": st.error, "upstream": st.warning, "low_drop": st.warning, "invalid": st.warning,
+            "ok": st.success}.get(verdict, st.info)
+    show(f"**Suggested check:** {suggestion}")
 
 
 def diagnostic_findings(npsha, npshr, required_margin, flow_lps,
@@ -474,204 +507,431 @@ def reset_repair_demo():
     st.session_state.simulate_cleaning = False
 
 
-st.set_page_config(page_title="Pump Detective", layout="centered")
-st.title("Pump Detective")
-with st.sidebar:
-    st.subheader("NPSH safety margin")
-    engineer_margin = st.number_input(
-        "Engineer-required NPSH margin (m)",
-        min_value=0.0, value=1.0, step=0.1, format="%.2f",
-        help="Shared by all NPSH checks, including Detective Intelligence. Select for the actual pump and application.",
-    )
-    st.caption(
-        "1.00 m is an editable demo starting value, not an engineering recommendation. "
-        "Use the engineer/manufacturer-selected additive margin. "
-        "The separate 0.50 m Xylem/catalog allowance is a reference comparison, "
-        "not a universal rule and is not added to this margin."
-    )
-# Tab order follows the demo story: predict and recommend first, diagnosis tools after.
-fouling, intelligence, repair, diagnostics, cavitation, part_load = st.tabs(
-    ["Fouling forecast", "Detective Intelligence", "Repair simulation", "Strainer diagnostics",
-     "Cavitation Shield", "Secondary pump · Part-load / VFD"]
-)
-
-with diagnostics:
-    st.caption(f"CHWPP-01 · Simulated absolute pressures (kPa abs) · Fixed flow of {DESIGN_FLOW_LPS:g} L/s · "
-               f"Normal suction reference {NORMAL_SUCTION_KPA_ABS:g} kPa abs")
-
-    scenario = st.selectbox("Choose a test case", SCENARIOS, on_change=hide_upstream_reading)
-    upstream, downstream = SCENARIOS[scenario]
-    show_upstream = st.toggle("Reveal upstream pressure", key="show_upstream")
-    measured_upstream = upstream if show_upstream else None
-    pressure_drop, suggestion = diagnose_filter(measured_upstream, downstream)
-
-    before, after, difference = st.columns(3)
-    before.metric(
-        "Before the strainer",
-        f"{measured_upstream:g} kPa abs" if measured_upstream is not None else "Hidden",
-    )
-    after.metric("After the strainer", f"{downstream:g} kPa abs")
-    difference.metric("Pressure drop", f"{pressure_drop:g} kPa" if pressure_drop is not None else "—")
-
-    st.subheader("Suggested check")
-    st.info(suggestion)
-    if pressure_drop is not None:
-        st.write(
-            f"Pressure drop: {measured_upstream:g} − {downstream:g} = {pressure_drop:g} kPa. "
-            f"Clean-strainer reference at this flow: {CLEAN_FILTER_DROP_KPA:g} kPa."
-        )
-
-
-with cavitation:
-    st.subheader("Suction-head comparison")
-    st.caption("Demo/reference pump: Lowara NSC 80-200/55 at approximately 1450 rpm. Water at 20 °C.")
-    st.write(
-        "Set the simulated absolute static pressure at the pump suction nozzle. "
-        "This demo assumes the pressure reading is at the pump's NPSH datum."
-    )
-    flow = st.slider("Flow (m³/h)", 40.0, 140.0, round(DESIGN_FLOW_LPS * 3.6, 1), 0.1)
-    pressure_abs = st.slider("Absolute suction pressure (kPa)", 5.0, 200.0, 30.0, 0.1)
-    diameter = LOWARA_SUCTION_NOZZLE_MM
-    st.caption(
-        f"Measurement point: pump suction flange, DN{diameter} ({diameter} mm internal diameter assumed), "
-        f"velocity {suction_velocity(flow, diameter):.2f} m/s. The diameter is fixed by the pump, so it is not "
-        "an input. The default pressure is a demonstration input."
-    )
-
-    available = available_npsh(pressure_abs, flow, diameter)
-    required = lowara_npshr(flow)
-    benchmark = required + CATALOG_ALLOWANCE_M
-    problem = npsha_input_problem(pressure_abs, flow, diameter)
-    if problem:
-        st.error("NPSH status: NOT ASSESSED — " + problem)
+def forecast_status_cards(summary):
+    """Header cards from the forecast summary: (label, value, sub-text, colour key)."""
+    reco, status = summary["recommendation"], summary["npsh_status_now"]
+    npsha = summary["npsha_now_m"]
+    cards = [(
+        "Pump suction · NPSH now", status,
+        (f"NPSHa {npsha:.2f} m vs NPSHr {summary['npshr_m']:.2f} m + {summary['engineer_required_margin_m']:.2f} m margin"
+         if npsha is not None else "Suction pressure too low to assess"), status,
+        "NPSH = pressure head at the pump inlet above the point where water boils. Below the pump's NPSHr the "
+        "water flashes to vapour bubbles (cavitation), which erodes the impeller. SAFE means the engineer's margin "
+        "above NPSHr is met.",
+    )]
+    if reco["action"].startswith("Restore"):
+        action = "Restore system pressure"
+    elif reco["priority"] == "NONE":
+        action = "Keep trending; nothing due"
     else:
-        show_npsh_assessment(available, required, engineer_margin)
-        st.write(
-            f"Separate Xylem/catalog reference: approximate NPSHr + {CATALOG_ALLOWANCE_M:.2f} m "
-            f"catalog allowance = {benchmark:.2f} m. "
-            f"Reference comparison: {'met' if available >= benchmark else 'not met'}."
+        action = "Clean and inspect the strainer"
+    cards.append(("Next action", reco["priority"], action, reco["priority"],
+                  "URGENT = now · HIGH = within 14 days · PLANNED = later · NONE = nothing within 180 days. "
+                  "Set by the rules, never by the AI."))
+    if reco["complete_by"]:
+        due = date.fromisoformat(reco["complete_by"])
+        days = (due - date.fromisoformat(summary["today"])).days
+        when = "due now" if days <= 0 else f"in {days} days"
+        cards.append(("Complete by", f"{due:%d %b %Y}", f"{when} · {reco['driver'] or ''}".rstrip(" ·"), reco["priority"],
+                      "The earliest date in the forecast's 95 % range at which the strainer reaches a limit."))
+    else:
+        cards.append(("Complete by", "—", "no limit reached within 180 days", "NONE"))
+    bt = summary["backtest"]
+    if bt["step_change_too_recent_for_past_forecast"]:
+        cards.append(("Forecast check", "Not judged", "step change too recent for a backtest", "NOT ASSESSED"))
+    else:
+        err = bt["error_on_last_hidden_day_pct"]
+        cards.append(("Forecast check", f"{err:+.1f} %", f"error after {bt['days_hidden']} hidden days (backtest)",
+                      "SAFE" if abs(err) <= 10 else "WARNING",
+                      "The latest days were hidden, the same method forecast them, and the result was compared with "
+                      "what the sensors showed. See the Forecast check tab."))
+    ver = summary.get("post_maintenance_verification")
+    if ver:
+        cards.append(("Last maintenance check", ver["strainer_verdict"],
+                      f"Δp* {ver['normalised_dp_after_kpa']:.2f} kPa after cleaning", ver["strainer_verdict"]))
+    return cards
+
+
+def generate_answer(snapshot, question, topic, ai):
+    """Work order or explanation: OpenAI when selected, otherwise the deterministic offline writer."""
+    if ai["use_ai"]:
+        return request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
+    if topic == MAINTENANCE_TOPIC:
+        return offline_work_order(snapshot)
+    return offline_explanation(snapshot, topic)
+
+
+def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, primary=False):
+    """A Generate button for one snapshot and question; the saved answer is dropped when either changes.
+
+    Returns the snapshot as JSON text (used for downloads).
+    """
+    snapshot_text = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    fingerprint = hashlib.sha256((snapshot_text + ai["mode"] + ai["model"] + question).encode("utf-8")).hexdigest()
+    saved = st.session_state.get(state_key)
+    if saved and saved["fingerprint"] != fingerprint:
+        st.session_state.pop(state_key, None)
+    not_ready = ai["use_ai"] and (not ai["api_key"] or not ai["model"])
+    clicked = (slot or st).button(
+        label, key=f"{state_key}_button", disabled=not_ready, type="primary" if primary else "secondary",
+        width="stretch" if slot else "content",
+        help="The AI service is not configured on this server; switch to Offline in Settings." if not_ready else None,
+    )
+    if clicked:
+        # Remove the previous answer first, including when a new request fails.
+        st.session_state.pop(state_key, None)
+        try:
+            with st.spinner("Writing…"):
+                answer = generate_answer(snapshot, question, topic, ai)
+            st.session_state[state_key] = {"fingerprint": fingerprint, "answer": answer,
+                                           "mode": ai["mode"], "question": question}
+        except (RuntimeError, ValueError) as exc:
+            st.error(str(exc))
+            st.info("Your calculated results are unchanged. Switch to Offline in Settings while the AI connection "
+                    "is unavailable.")
+    return snapshot_text
+
+
+def show_answer(state_key, snapshot_text, file_name):
+    saved = st.session_state.get(state_key)
+    if not saved:
+        return
+    with st.container(border=True):
+        st.caption(f"{saved['mode']} · {saved['question']}")
+        if saved["mode"] == AI_OPENAI:
+            # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
+            st.markdown(saved["answer"].replace("$", "\\$"))
+        else:
+            st.text(saved["answer"])
+        st.caption("Calculated results are authoritative. This text does not confirm a physical fault or certify "
+                   "pump safety.")
+        title = "Maintenance work order" if state_key == "work_order" else "Pump Detective answer"
+        st.download_button(
+            "⬇ Download PDF", data=reports.text_pdf(
+                title, f"{saved['mode']} · question: {saved['question']}", saved["answer"],
+                note="Calculated results are authoritative. This text does not confirm a physical fault or certify "
+                     "pump safety."),
+            file_name=file_name, mime="application/pdf", key=f"{state_key}_download",
         )
-    if pressure_abs < ATMOSPHERIC_KPA_ABS:
-        st.info(
-            f"Suction is below atmospheric pressure ({pressure_abs:.1f} kPa abs ≈ "
-            f"{pressure_abs - ATMOSPHERIC_KPA_ABS:+.1f} kPa gauge). In a closed chilled-water loop this is itself "
-            "abnormal: check system fill pressure and the expansion-tank pre-charge and connection point. "
-            "Sub-atmospheric sections can draw air in through vents and seals."
+
+
+def forecast_snapshot(summary, margin):
+    """The structured snapshot the work order and explanations are written from (forecast case)."""
+    suction, q_lps = summary["suction_now_kpa_abs"], DESIGN_FLOW_LPS
+    problem = npsha_input_problem(suction, q_lps * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+    npsha = available_npsh(suction, q_lps * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+    npshr = None if problem else summary["npshr_m"]
+    assessed = None if npshr is None else npsh_assessment(npsha, npshr, margin)
+    return {
+        "source": "Strainer forecast · predictive trend",
+        "case": summary["scenario"],
+        "flow_lps": q_lps, "suction_absolute_kpa": suction, "suction_diameter_mm": LOWARA_SUCTION_NOZZLE_MM,
+        "speed_percent": None, "pump_curve": "Lowara demo/reference approximately 1450 rpm",
+        "npsha_m": npsha, "npshr_m": npshr, "engineer_required_margin_m": margin,
+        "actual_margin_m": None if assessed is None else assessed[0],
+        "surplus_deficit_m": None if assessed is None else assessed[1],
+        "npsh_status": "NOT ASSESSED · unusable suction reading" if problem else assessed[2],
+        "filter_drop_kpa": summary["normalised_dp_now_kpa"], "clean_filter_reference_kpa": CLEAN_FILTER_DROP_KPA,
+        "filter_tolerance_kpa": None, "manufacturer_minimum_flow_lps": None,
+        "assumptions": "Water at 20 C; static absolute pressure at NPSH datum. No overall safety verdict.",
+        "catalog_allowance_note": "Separate 0.50 m Xylem/catalog comparison for Lowara demo only; not added to engineer margin.",
+        "findings": forecast_findings(summary),
+        "forecast": summary,
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def forecast_report_pdf(payload):
+    """Build the forecast report PDF once per distinct content (``payload`` is JSON text)."""
+    data = json.loads(payload)
+    return reports.forecast_report_pdf(
+        data["summary"], data["findings"], [tuple(card) for card in data["cards"]],
+        ([tuple(p) for p in data["daily"]], [tuple(p) for p in data["forecast"]], [tuple(x) for x in data["limits"]]),
+        data["work_order"],
+    )
+
+
+@st.dialog("Record the cleaning result")
+def verify_dialog(context):
+    """Post-maintenance reading → verdict. ``context`` carries the forecast values the verdict depends on."""
+    st.write("After cleaning, enter one strainer Δp reading **and the flow at that moment**. It is corrected to "
+             "design flow and compared with the clean baseline, within your instruments' accuracy.")
+    with st.form("verify_form", border=False):
+        v1, v2 = st.columns(2)
+        v_dp = v1.number_input("Post-cleaning strainer Δp (kPa)", min_value=0.0, value=None, step=0.1,
+                               placeholder="e.g. 5.1", key="verify_dp")
+        v_flow = v2.number_input("Flow during that reading (L/s)", min_value=0.0, value=None, step=0.1,
+                                 placeholder="e.g. 21.0", key="verify_flow")
+        with st.expander("Baseline and instrument accuracy"):
+            v3, v4 = st.columns(2)
+            v_baseline = v3.number_input(
+                "Clean baseline Δp* at design flow (kPa)", min_value=0.1, value=CLEAN_FILTER_DROP_KPA, step=0.1,
+                key="verify_baseline",
+                help="Demo value. In the field, use the flow-normalised Δp measured after commissioning or the last good cleaning.",
+            )
+            v_repeat = v4.number_input(
+                "Baseline repeatability, 1σ (kPa)", min_value=0.0, value=0.0, step=0.05, key="verify_repeat",
+                help="Spread of past post-cleaning Δp* readings for this strainer. 0 = instrument uncertainty only.",
+            )
+            v_method = st.radio("Δp measured with", (vf.TWO_ABSOLUTE, vf.DIFFERENTIAL), key="verify_method")
+            i1, i2, i3 = st.columns(3)
+            v_span = i1.number_input("Pressure span (kPa)", min_value=1.0, value=400.0, step=1.0, key="verify_span",
+                                     help="Span of each absolute transmitter, or of the DP transmitter if one is used.")
+            v_acc = i2.number_input("Pressure ± % span", min_value=0.0, value=0.1, step=0.01,
+                                    format="%.3f", key="verify_acc", help="Transmitter accuracy, ± % of span.")
+            v_qacc = i3.number_input("Flow ± % reading", min_value=0.0, value=0.5, step=0.1,
+                                     key="verify_qacc", help="Flow meter accuracy, ± % of reading.")
+            st.caption(
+                "Defaults are example datasheet figures (0–400 kPa abs transmitters at ±0.1 % of span, flow meter at "
+                "±0.5 % of reading), not measurements of a real installation. Accuracy limits are treated as "
+                "rectangular (GUM), and the result is reported at k = 2 (about 95 %). A single DP transmitter across "
+                "the strainer gives a much tighter band than subtracting two absolute transmitters."
+            )
+        v_submit = st.form_submit_button("Verify maintenance", type="primary")
+    if not v_submit:
+        return
+    problem = vf.reading_problem(v_dp, v_flow, DESIGN_FLOW_LPS, pressure_before_kpa_abs=context["upstream"],
+                                 max_flow_lps=LOWARA_CURVE[-1][0] / 3.6)
+    if problem:
+        st.error("Reading not accepted — " + problem)
+        return
+    try:
+        result = vf.verify_cleaning(
+            v_dp, v_flow, DESIGN_FLOW_LPS, v_baseline, context["maint_limit"],
+            vf.Instruments(v_method, v_span, v_acc, v_qacc),
+            dp_star_before_kpa=context["dp_star_now"], baseline_repeatability_kpa=v_repeat,
         )
-    st.caption("Status uses the engineer-required margin only. SAFE describes this demo criterion; it does not certify pump operation.")
-
-    st.caption(
-        "Educational simulation. The curve points were read approximately from the graph. "
-        "An installed pump requires its own curve, operating conditions, and margin review."
-    )
-    st.markdown(
-        "[Xylem Lowara e-NSC catalog, page 100]"
-        "(https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/"
-        "191002951_nsc-50hz_en.pdf#page=100)"
-    )
+    except ValueError as exc:
+        # Our own validation messages only; never a raw traceback.
+        st.error("Reading not accepted — " + str(exc))
+        return
+    st.session_state["verification"] = {
+        "scenario": context["scenario"], "upstream": context["upstream"], "maint_limit": context["maint_limit"],
+        "result": result, "dp_kpa": v_dp, "flow_lps": v_flow, "method": v_method,
+    }
+    st.rerun()
 
 
-with repair:
-    st.subheader("Would cleaning the strainer improve suction?")
-    st.caption(
-        "Simulated absolute pressures · Lowara demo/reference pump curve · Water at 20 °C · "
-        f"Fixed flow of {DESIGN_FLOW_LPS:g} L/s"
-    )
-    st.write(
-        "**Fault scenario (simulated):** a rooftop chiller plant with the pumps near the top of a closed "
-        "chilled-water loop. System fill pressure has been lost (for example a failed expansion-tank pre-charge "
-        "or an unrepaired leak), so pump suction has fallen far below atmospheric pressure. In normal operation this "
-        f"demo plant's suction is about {NORMAL_SUCTION_KPA_ABS:g} kPa abs."
-    )
-    st.caption(
-        "With this pump's low NPSHr (about 1 m), cavitation is only possible at deeply sub-atmospheric suction, "
-        "so both cases are abnormal by design. Which one is caused by the strainer?"
-    )
-    repair_case = st.selectbox(
-        "Choose a low-pressure case",
-        ("Scenario A", "Scenario B"),
-        on_change=reset_repair_demo,
-    )
-    suction_kpa = 8.0
-    upstream_kpa = 33.0 if repair_case == "Scenario A" else 13.0
-    reveal = st.toggle("Reveal pressure before the strainer", key="repair_reading_visible")
-    measured = upstream_kpa if reveal else None
-    drop, suggestion = diagnose_filter(measured, suction_kpa)
+FORECAST_PAGE, TOOLS_PAGE = "📈 Strainer forecast", "🧰 Engineering tools"
+AI_OFFLINE, AI_OPENAI = "Offline · rule-based", "AI · OpenAI"
 
-    inlet, outlet, loss = st.columns(3)
-    inlet.metric("Before the strainer", f"{measured:g} kPa abs" if reveal else "Hidden")
-    outlet.metric("At pump suction", f"{suction_kpa:g} kPa abs")
-    loss.metric("Strainer pressure drop", f"{drop:g} kPa" if drop is not None else "—")
-    st.info(suggestion)
 
-    if reveal:
+def server_setting(name, default=""):
+    """A developer setting: Streamlit secrets first (.streamlit/secrets.toml or the host's secrets), then the
+    environment. Never typed by users and never sent to the browser."""
+    try:
+        value = st.secrets.get(name)
+    except Exception:  # noqa: BLE001 - no secrets file is a normal setup
+        value = None
+    return str(value or os.environ.get(name, default)).strip()
+
+
+AI_KEY = server_setting("OPENAI_API_KEY")
+AI_MODEL = server_setting("OPENAI_MODEL", "gpt-6-luna")
+
+st.set_page_config(page_title="Pump Detective", page_icon="🔍", layout="wide")
+ui.apply_style()
+page_top = st.container()  # header and status row; filled once the page's results are known
+with st.sidebar:
+    st.markdown("### 🔍 Pump Detective")
+    page = st.radio("Page", (FORECAST_PAGE, TOOLS_PAGE), key="page", label_visibility="collapsed")
+    on_tools_page = page == TOOLS_PAGE
+sensor_box = st.sidebar.container()  # forecast inputs are placed here by the forecast page
+with st.sidebar:
+    with st.expander("⚙️ Settings", expanded=False):
+        engineer_margin = st.number_input(
+            "NPSH safety margin (m)",
+            min_value=0.0, value=1.0, step=0.1, format="%.2f",
+            help="Extra suction head required above the pump's NPSHr before the app calls it SAFE. Used by every NPSH "
+                 "check and the work order. 1.00 m is a demo value: use the margin your engineer or the pump "
+                 "manufacturer specifies. The catalogue's 0.50 m allowance is shown separately and not added.",
+        )
+        if AI_KEY:
+            ai_mode = st.radio(
+                "Write work orders with", (AI_OPENAI, AI_OFFLINE), key="explain_mode",
+                help="AI writes the work order as natural text; Offline builds it instantly from the rules. Either "
+                     "way, Python sets every number, date and priority.",
+            )
+        else:
+            ai_mode = AI_OFFLINE
+ai = {"mode": ai_mode, "use_ai": ai_mode == AI_OPENAI, "api_key": AI_KEY, "model": AI_MODEL}
+
+if on_tools_page:
+    with page_top:
+        ui.header("SYNTHETIC", "Engineering tools · simulated pressures")
+    ui.tool_cards([
+        ("🔧", "Repair simulation", "Which fix restores suction?"),
+        ("🔍", "Strainer diagnostics", "Strainer or upstream?"),
+        ("🛡️", "Cavitation Shield", "Will the pump cavitate?"),
+        ("⚙️", "Part-load / VFD", "Safe at part load?"),
+        ("🧠", "Findings & explanation", "Evidence, next checks, AI"),
+    ])
+    repair, diagnostics, cavitation, part_load, tool_findings = st.tabs(
+        ["🔧 Repair simulation", "🔍 Strainer diagnostics", "🛡️ Cavitation Shield", "⚙️ Part-load / VFD",
+         "🧠 Findings & explanation"]
+    )
+
+if on_tools_page:
+    with diagnostics:
+        ui.section(None, "Strainer diagnostics", "Is the strainer blocked, or is the problem upstream?",
+                   "A reading after the strainer alone cannot tell. Reveal the reading before it: the drop across "
+                   "the strainer answers the question.", first=True)
+        d_in, d_out = st.columns([1, 2], gap="large")
+        with d_in:
+            with st.container(border=True):
+                st.markdown("**Inputs**")
+                scenario = st.selectbox("Test case", SCENARIOS, on_change=hide_upstream_reading)
+                upstream, downstream = SCENARIOS[scenario]
+                show_upstream = st.toggle("Reveal the pressure before the strainer", key="show_upstream")
+                st.caption(f"Simulated absolute pressures at the fixed design flow of {DESIGN_FLOW_LPS:g} L/s. "
+                           f"Normal suction for this plant: {NORMAL_SUCTION_KPA_ABS:g} kPa abs.")
+        measured_upstream = upstream if show_upstream else None
+        pressure_drop, suggestion = diagnose_filter(measured_upstream, downstream)
+        d_verdict = strainer_verdict(measured_upstream, downstream)
+        with d_out:
+            ui.status_cards([
+                ("Before the strainer", "Hidden" if measured_upstream is None else f"{measured_upstream:g} kPa abs",
+                 "reveal it to diagnose" if measured_upstream is None else "measured", 
+                 "NOT ASSESSED" if measured_upstream is None else "PLANNED"),
+                ("Pressure drop", "—" if pressure_drop is None else f"{pressure_drop:g} kPa",
+                 f"clean reference {CLEAN_FILTER_DROP_KPA:g} ± {TOLERANCE_KPA:g} kPa", VERDICT_KEY[d_verdict]),
+                ("Verdict", VERDICT_TEXT[d_verdict], "from the strainer pressure drop", VERDICT_KEY[d_verdict]),
+            ])
+            st.markdown(visuals.suction_line_svg(measured_upstream, downstream, pressure_drop, d_verdict),
+                        unsafe_allow_html=True)
+            verdict_alert(d_verdict, suggestion)
+        with st.expander("Assumptions"):
+            st.caption("Both readings are absolute pressures taken at the same flow. The 5 kPa clean drop and ±2 kPa "
+                       "tolerance are demonstration values, not field alarm thresholds.")
+
+
+    with cavitation:
+        ui.section(None, "Cavitation Shield", "Will the pump cavitate at this operating point?",
+                   "Move the flow and suction pressure. The dot shows what the system supplies against what the pump "
+                   "needs.", first=True)
+        c_in, c_out = st.columns([1, 2], gap="large")
+        with c_in:
+            with st.container(border=True):
+                st.markdown("**Operating point**")
+                flow = st.slider("Flow (m³/h)", 40.0, 140.0, round(DESIGN_FLOW_LPS * 3.6, 1), 0.1)
+                pressure_abs = st.slider("Absolute suction pressure (kPa)", 5.0, 200.0, 30.0, 0.1)
+                diameter = LOWARA_SUCTION_NOZZLE_MM
+                st.caption(f"At the DN{diameter} suction flange: velocity {suction_velocity(flow, diameter):.2f} m/s. "
+                           "Lowara NSC 80-200/55 at about 1450 rpm; water at 20 °C.")
+        available = available_npsh(pressure_abs, flow, diameter)
+        required = lowara_npshr(flow)
+        benchmark = required + CATALOG_ALLOWANCE_M
+        problem = npsha_input_problem(pressure_abs, flow, diameter)
+        c_status = "NOT ASSESSED" if problem else npsh_assessment(available, required, engineer_margin)[2]
+        with c_out:
+            if problem:
+                ui.status_cards([("NPSH status", "NOT ASSESSED", "the inputs cannot give a valid NPSHa", "NOT ASSESSED")])
+                st.error(problem)
+            else:
+                show_npsh_assessment(available, required, engineer_margin)
+            st.altair_chart(visuals.npsh_curve_chart(LOWARA_CURVE, engineer_margin, CATALOG_ALLOWANCE_M, flow,
+                                                     None if problem else available, c_status), width="stretch")
+            if pressure_abs < ATMOSPHERIC_KPA_ABS:
+                st.info(f"Suction is below atmospheric ({pressure_abs:.1f} kPa abs ≈ "
+                        f"{pressure_abs - ATMOSPHERIC_KPA_ABS:+.1f} kPa gauge). In a closed chilled-water loop that is "
+                        "abnormal in itself: check fill pressure and the expansion tank.")
+        with st.expander("Assumptions and references"):
+            st.caption(
+                f"The pressure reading is the absolute static pressure at the pump's NPSH datum (the DN{diameter} "
+                "suction flange; the diameter is fixed by the pump). Status uses the engineer-required margin from "
+                "Settings only; SAFE describes this demo criterion and does not certify pump operation."
+            )
+            if not problem:
+                st.caption(f"Separate Xylem/catalogue reference: NPSHr + {CATALOG_ALLOWANCE_M:.2f} m = {benchmark:.2f} m "
+                           f"({'met' if available >= benchmark else 'not met'}). It is not added to the margin.")
+            st.caption("The curve points were read approximately from the graph. An installed pump needs its own curve.")
+            st.markdown("[Xylem Lowara e-NSC catalog, page 100]"
+                        "(https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/"
+                        "191002951_nsc-50hz_en.pdf#page=100)")
+
+
+    with repair:
+        ui.section(None, "Repair simulation", "Which fix actually restores the pump's suction?",
+                   "A rooftop plant has lost fill pressure, so pump suction is far below atmospheric. One reading "
+                   "finds the cause; then compare the repairs.", first=True)
+        r_in, r_out = st.columns([1, 2], gap="large")
+        with r_in:
+            with st.container(border=True):
+                st.markdown("**Fault case**")
+                repair_case = st.selectbox("Low-pressure case", ("Scenario A", "Scenario B"), on_change=reset_repair_demo)
+                reveal = st.toggle("Reveal the pressure before the strainer", key="repair_reading_visible")
+                st.caption(f"Both cases read 8 kPa abs at the pump suction. Normal for this plant: "
+                           f"{NORMAL_SUCTION_KPA_ABS:g} kPa abs. With this pump's NPSHr of about 1 m, cavitation is "
+                           "only possible at such deeply sub-atmospheric suction.")
+        suction_kpa = 8.0
+        upstream_kpa = 33.0 if repair_case == "Scenario A" else 13.0
+        measured = upstream_kpa if reveal else None
+        drop, suggestion = diagnose_filter(measured, suction_kpa)
+        r_verdict = strainer_verdict(measured, suction_kpa)
         flow = DESIGN_FLOW_LPS * 3.6
         nozzle_mm = 100
         before = available_npsh(suction_kpa, flow, nozzle_mm)
         required = lowara_npshr(flow)
         benchmark = required + CATALOG_ALLOWANCE_M
         engineer_target = required + engineer_margin
-        st.subheader("Current NPSH safety margin")
-        show_npsh_assessment(before, required, engineer_margin)
-        st.caption(
-            f"Separate Xylem/catalog comparison: NPSHr + {CATALOG_ALLOWANCE_M:.2f} m "
-            f"= {benchmark:.2f} m. This allowance is not added to the engineer-required margin."
-        )
-        restored_suction = upstream_kpa - CLEAN_FILTER_DROP_KPA
-        after_cleaning = available_npsh(restored_suction, flow, nozzle_mm)
-        simulate_cleaning = st.checkbox("Simulate a clean strainer", key="simulate_cleaning")
-        if simulate_cleaning:
-            initial, cleaned = st.columns(2)
-            initial.metric("NPSH available before cleaning", f"{before:.2f} m")
-            cleaned.metric("NPSH available with clean strainer", f"{after_cleaning:.2f} m", f"{after_cleaning - before:+.2f} m")
-            st.subheader("NPSH safety margin after cleaning")
-            show_npsh_assessment(after_cleaning, required, engineer_margin)
-            if after_cleaning < engineer_target:
-                st.info("The clean strainer still falls short of the selected target. Check conditions upstream.")
-            st.caption(
-                "The model holds flow and upstream pressure fixed. It assumes a 100 mm internal "
-                "diameter and negligible pressure loss between the strainer outlet and pump suction. "
-                "Cleaning sets the strainer loss to the demo's 5 kPa reference."
-            )
+        with r_out:
+            st.markdown(visuals.suction_line_svg(measured, suction_kpa, drop, r_verdict), unsafe_allow_html=True)
+            verdict_alert(r_verdict, suggestion)
+            st.markdown("**NPSH now**")
+            show_npsh_assessment(before, required, engineer_margin)
 
-        st.subheader("Compare suction-side changes")
-        st.caption(
-            "The pipe segment is before the strainer. Assumed baseline: 80 mm internal diameter, "
-            "12 m straight length, and Darcy friction factor 0.025. The 100 mm pump inlet stays fixed."
-        )
-        new_diameter = st.slider("Proposed pipe internal diameter (mm)", 80, 160, 100, 5)
-        old_loss = straight_pipe_loss_kpa(flow, 80, 12, 0.025)
-        new_loss = straight_pipe_loss_kpa(flow, new_diameter, 12, 0.025)
-        after_resize = available_npsh(suction_kpa + old_loss - new_loss, flow, nozzle_mm)
-        pressure_needed = max(0.0, engineer_target - before) * WATER_DENSITY_KG_M3 * GRAVITY_M_S2 / 1000
-
-        st.write(f"Straight-pipe pressure loss: **{old_loss:.2f} → {new_loss:.2f} kPa**.")
-        st.table(
-            [
-                {
-                    "Change": label,
-                    "NPSHa (m)": f"{head:.2f}",
-                    "NPSHr (m, approx.)": f"{required:.2f}",
-                    "Actual margin (m)": f"{npsh_assessment(head, required, engineer_margin)[0]:+.2f}",
-                    "Engineer-required margin (m)": f"{engineer_margin:.2f}",
-                    "Surplus / deficit (m)": f"{npsh_assessment(head, required, engineer_margin)[1]:+.2f}",
-                    "Status": npsh_assessment(head, required, engineer_margin)[2],
-                    "Vs. separate catalog allowance (m)": f"{head - benchmark:+.2f}",
-                }
-                for label, head in (
-                    ("Current condition", before),
-                    ("Clean the strainer", after_cleaning),
-                    (f"Resize pipe to {new_diameter} mm", after_resize),
-                    (f"Add {pressure_needed:.2f} kPa before the pipe", max(before, engineer_target)),
-                )
+        if reveal:
+            ui.section(None, "Compare repairs", "What does each fix do to NPSH available?",
+                       "Every option starts from the same current condition, at the same flow.")
+            o_in, o_out = st.columns([1, 2], gap="large")
+            with o_in:
+                with st.container(border=True):
+                    st.markdown("**Pipe resize option**")
+                    new_diameter = st.slider("Proposed pipe internal diameter (mm)", 80, 160, 100, 5)
+                    st.caption("The resized segment is before the strainer: 80 mm, 12 m straight pipe, Darcy f = 0.025 "
+                               "today. The 100 mm pump inlet stays fixed.")
+            restored_suction = upstream_kpa - CLEAN_FILTER_DROP_KPA
+            after_cleaning = available_npsh(restored_suction, flow, nozzle_mm)
+            old_loss = straight_pipe_loss_kpa(flow, 80, 12, 0.025)
+            new_loss = straight_pipe_loss_kpa(flow, new_diameter, 12, 0.025)
+            after_resize = available_npsh(suction_kpa + old_loss - new_loss, flow, nozzle_mm)
+            pressure_needed = max(0.0, engineer_target - before) * WATER_DENSITY_KG_M3 * GRAVITY_M_S2 / 1000
+            options = [
+                ("Current condition", before),
+                ("Clean the strainer", after_cleaning),
+                (f"Resize pipe to {new_diameter} mm", after_resize),
+                (f"Add {pressure_needed:.1f} kPa system pressure", max(before, engineer_target)),
             ]
-        )
-        st.caption(
-            "Each change starts from the same baseline. The comparison holds flow and pipe-inlet "
-            "velocity head constant (the changed segment is between fixed stations). It models "
-            "straight-pipe friction only and excludes fitting and transition losses. The pressure "
-            "increase is the modeled amount needed to reach NPSHr plus the engineer-required margin."
-        )
+            with o_out:
+                st.altair_chart(visuals.options_chart(
+                    [(label, head, npsh_assessment(head, required, engineer_margin)[2]) for label, head in options],
+                    required, engineer_target), width="stretch")
+                if after_cleaning >= engineer_target:
+                    st.success(f"**Cleaning the strainer is enough:** NPSH available rises from {before:.2f} m to "
+                               f"{after_cleaning:.2f} m, above the {engineer_target:.2f} m target.")
+                else:
+                    st.warning(f"**Cleaning alone is not enough:** {after_cleaning:.2f} m stays below the "
+                               f"{engineer_target:.2f} m target. Restore system pressure (fill pressure, expansion tank).")
+                if restored_suction < ATMOSPHERIC_KPA_ABS:
+                    st.info(f"Even with a clean strainer, suction stays at {restored_suction:.0f} kPa abs, below "
+                            "atmospheric. The root cause is the lost fill pressure.")
+            with st.expander("The numbers behind the chart, and assumptions"):
+                st.table([
+                    {
+                        "Change": label, "NPSHa (m)": f"{head:.2f}", "NPSHr (m)": f"{required:.2f}",
+                        "Margin (m)": f"{npsh_assessment(head, required, engineer_margin)[0]:+.2f}",
+                        "Vs target (m)": f"{npsh_assessment(head, required, engineer_margin)[1]:+.2f}",
+                        "Status": npsh_assessment(head, required, engineer_margin)[2],
+                        "Vs catalogue ref. (m)": f"{head - benchmark:+.2f}",
+                    }
+                    for label, head in options
+                ])
+                st.caption(
+                    f"Straight-pipe loss {old_loss:.2f} → {new_loss:.2f} kPa. The model holds flow and the pressure "
+                    "before the strainer fixed, assumes negligible loss between strainer outlet and pump suction, and "
+                    "models straight-pipe friction only (no fittings). Cleaning sets the strainer loss to the 5 kPa "
+                    "reference. The added pressure is the amount needed to reach NPSHr plus the engineer margin."
+                )
 
 
 @st.cache_data(show_spinner=False)
@@ -680,101 +940,105 @@ def load_uploaded_log(file_bytes):
     return fc.load_sensor_csv(io.BytesIO(file_bytes), DESIGN_FLOW_LPS)
 
 
-FC_DEMO, FC_UPLOAD = "Synthetic demo scenario", "Upload my own sensor log (CSV)"
+FC_DEMO, FC_UPLOAD = "Synthetic demo", "My own sensor log (CSV)"
 EXAMPLE_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples", "example_sensor_log.csv")
 
-with fouling:
-    st.subheader("When will the strainer cost us the NPSH margin?")
-    fc_source = st.radio("Sensor data", (FC_DEMO, FC_UPLOAD), horizontal=True, key="fc_source")
-    fc_upload = None  # (file name, hourly log, info) once a valid file is loaded
-    if fc_source == FC_UPLOAD:
-        fc_file = st.file_uploader(
-            "Strainer sensor log (CSV)", type=["csv"], key="fc_file",
-            help="Any logging interval. The file is analysed in memory for this session only and is not saved.",
-        )
-        with st.expander("Expected CSV format and an example file"):
-            st.markdown(
-                "One row per reading, with a header row. Column names are not case-sensitive.\n\n"
-                "| Column | Unit | |\n|---|---|---|\n"
-                "| `timestamp` | e.g. `2026-11-01 14:15` | required |\n"
-                f"| `flow_lps` | L/s (design {DESIGN_FLOW_LPS:g} L/s) | required |\n"
-                "| `pressure_before_kpa_abs` | kPa **absolute**, before the strainer | with `suction_kpa_abs` |\n"
-                "| `suction_kpa_abs` | kPa **absolute**, at the pump suction | with `pressure_before_kpa_abs` |\n"
-                "| `dp_kpa` | kPa, from a DP transmitter across the strainer | instead of the two pressures |\n\n"
-                f"At least {fc.MIN_UPLOAD_DAYS} days. Readings are averaged to hourly values; gaps and pump stops "
-                "(flow 0) are allowed. Strainer cleanings in the log are detected and the trend restarts after the "
-                "last one. The *Download* button at the bottom of this tab gives a log in this format too."
-            )
-            if os.path.exists(EXAMPLE_LOG_PATH):
-                with open(EXAMPLE_LOG_PATH, "rb") as example_file:
-                    st.download_button(
-                        "Download an example log (synthetic, 40 days, 15-minute readings)", example_file.read(),
-                        file_name="example_sensor_log.csv", mime="text/csv", key="fc_example",
-                    )
-        if fc_file is not None:
-            try:
-                fc_up_log, fc_up_info = load_uploaded_log(fc_file.getvalue())
-                # Pre-flight: make sure a trend can be fitted before switching the whole tab to this file.
-                fc_up_norm = fc.normalise_dp(fc_up_log["dp_kpa"], fc_up_log["flow_lps"], DESIGN_FLOW_LPS)
-                fc_up_daily = fc.daily_medians(fc_up_log, fc_up_norm, fc.find_spikes(fc_up_norm))
-                fc.fit_trend(fc_up_daily, steps=fc.regime_changes(fc_up_daily))
-                fc_upload = (fc_file.name, fc_up_log, fc_up_info)
-            except (fc.SensorLogError, ValueError) as exc:
-                st.error(f"File not used: {exc}")
-        if fc_upload is None:
-            st.info("Showing the **Gradual fouling** demo until a valid log is uploaded.")
+def read_example_log():
+    with open(EXAMPLE_LOG_PATH, "rb") as handle:
+        return handle.read()
 
-    fc_in1, fc_in2 = st.columns(2)
-    if fc_upload:
-        fc_up_name, fc_log, fc_up_info = fc_upload
-        fc_scenario = f"Uploaded log: {fc_up_name}"
-        st.success(
-            f"**{fc_up_name}**: {fc_up_info['rows_read']:,} rows from {fc_up_info['first_reading']:%d %b %Y %H:%M} "
-            f"to {fc_up_info['last_reading']:%d %b %Y %H:%M} ({fc_up_info['days']} days"
-            + (f", about every {fc_up_info['interval_minutes']:g} min" if fc_up_info["interval_minutes"] else "")
-            + f"). Hours without a usable reading: {fc_up_info['hours_without_data']}."
-            + (f" Rows with an unreadable time were skipped: {fc_up_info['rows_bad_time']}."
-               if fc_up_info["rows_bad_time"] else "")
-        )
-        for note in fc_up_info["warnings"]:
-            st.warning(note)
-        st.caption(
-            "USER-SUPPLIED sensor log · analysed in memory, not saved · the app cannot confirm it comes from this "
-            f"plant · Lowara demo/reference pump · design flow {DESIGN_FLOW_LPS:g} L/s · water at 20 °C · "
-            "dates are relative to the last reading in the file"
-        )
-        if fc_up_info["pressure_before_last_7d_kpa_abs"] is not None:
-            fc_upstream = round(fc_up_info["pressure_before_last_7d_kpa_abs"], 1)
-            fc_in1.metric("Pressure before the strainer (median, last 7 days)", f"{fc_upstream:g} kPa abs",
-                          help="Taken from the file and used to convert the NPSH limits into strainer Δp limits.")
-        else:
-            fc_upstream = fc_in1.number_input(
-                "Pressure before the strainer at design flow (kPa abs)", min_value=5.0, max_value=400.0,
-                value=105.0, step=1.0, key="fc_upstream_upload",
-                help="The file has only a DP column, so enter the absolute pressure before the strainer.",
+
+if not on_tools_page:
+    fc_upload = None  # (file name, hourly log, info) once a valid file is loaded
+    with sensor_box:
+        st.markdown("**📥 Sensor data**")
+        fc_source = st.radio("Sensor data", (FC_DEMO, FC_UPLOAD), key="fc_source", label_visibility="collapsed")
+        if fc_source == FC_UPLOAD:
+            fc_file = st.file_uploader(
+                "Strainer sensor log (CSV)", type=["csv"], key="fc_file",
+                help="Any logging interval. The file is analysed in memory for this session only and is not saved.",
             )
-    else:
-        st.caption(
-            "SYNTHETIC sensor log · 60 days of hourly readings generated by the app, not field data · "
-            f"Lowara demo/reference pump · design flow {DESIGN_FLOW_LPS:g} L/s · water at 20 °C"
+            fc_bytes = fc_file.getvalue() if fc_file is not None else None
+            fc_name = fc_file.name if fc_file is not None else None
+            if fc_bytes is None and os.path.exists(EXAMPLE_LOG_PATH):
+                if st.session_state.get("fc_use_example"):
+                    fc_bytes, fc_name = read_example_log(), "example_sensor_log.csv"
+                    st.button("✕ Stop using the example log", key="fc_example_off",
+                              on_click=lambda: st.session_state.update(fc_use_example=False))
+                else:
+                    st.button("▶ Try it with the example log", key="fc_example_on", type="primary",
+                              on_click=lambda: st.session_state.update(fc_use_example=True),
+                              help="Loads a synthetic 40-day logger export (15-minute readings, one cleaning).")
+            with st.expander("CSV format"):
+                st.markdown(
+                    "Header row, one reading per row:\n\n"
+                    "- `timestamp` (e.g. `2026-11-01 14:15`)\n"
+                    f"- `flow_lps`, L/s (design {DESIGN_FLOW_LPS:g})\n"
+                    "- `pressure_before_kpa_abs` and `suction_kpa_abs`, kPa **absolute**, "
+                    "or `dp_kpa` from a DP transmitter\n\n"
+                    f"At least {fc.MIN_UPLOAD_DAYS} days. Any interval; gaps and pump stops are fine; cleanings are "
+                    "detected and the trend restarts after the last one."
+                )
+                if os.path.exists(EXAMPLE_LOG_PATH):
+                    st.download_button("Download the example log", read_example_log(),
+                                       file_name="example_sensor_log.csv", mime="text/csv", key="fc_example")
+            if fc_bytes is not None:
+                try:
+                    with st.spinner("Analysing the log…"):
+                        fc_up_log, fc_up_info = load_uploaded_log(fc_bytes)
+                        # Pre-flight: make sure a trend can be fitted before switching the page to this file.
+                        fc_up_norm = fc.normalise_dp(fc_up_log["dp_kpa"], fc_up_log["flow_lps"], DESIGN_FLOW_LPS)
+                        fc_up_daily = fc.daily_medians(fc_up_log, fc_up_norm, fc.find_spikes(fc_up_norm))
+                        fc.fit_trend(fc_up_daily, steps=fc.regime_changes(fc_up_daily))
+                    fc_upload = (fc_name, fc_up_log, fc_up_info)
+                except (fc.SensorLogError, ValueError) as exc:
+                    st.error(f"File not used: {exc}")
+            if fc_upload is None:
+                st.caption("Showing the Gradual fouling demo until a valid log is loaded.")
+
+        if fc_upload:
+            fc_up_name, fc_log, fc_up_info = fc_upload
+            fc_scenario = f"Uploaded log: {fc_up_name}"
+            st.success(
+                f"**{fc_up_name}** · {fc_up_info['days']} days · {fc_up_info['first_reading']:%d %b} → "
+                f"{fc_up_info['last_reading']:%d %b %Y}"
+                + (f" · every {fc_up_info['interval_minutes']:g} min" if fc_up_info["interval_minutes"] else "")
+            )
+            for note in fc_up_info["warnings"]:
+                st.warning(note)
+            if fc_up_info["pressure_before_last_7d_kpa_abs"] is not None:
+                fc_upstream = round(fc_up_info["pressure_before_last_7d_kpa_abs"], 1)
+                st.caption(f"Pressure before the strainer from the file (median, last 7 days): **{fc_upstream:g} kPa abs**")
+            else:
+                fc_upstream = st.number_input(
+                    "Pressure before the strainer (kPa abs)", min_value=5.0, max_value=400.0,
+                    value=105.0, step=1.0, key="fc_upstream_upload",
+                    help="The file has only a DP column, so enter the absolute pressure before the strainer.",
+                )
+        else:
+            fc_scenario = ("Gradual fouling" if fc_source == FC_UPLOAD else
+                           st.selectbox("Demo history", list(fc.SCENARIOS), key="fc_scenario"))
+            if fc_source == FC_DEMO:
+                st.caption(fc.SCENARIOS[fc_scenario]["story"])
+            fc_upstream = st.number_input(
+                "Pressure before the strainer (kPa abs)", min_value=5.0, max_value=400.0,
+                value=33.0, step=1.0, key="fc_upstream",
+                help="33 kPa abs is the demo's low-pressure rooftop plant (suction below atmospheric). "
+                     "Try 105 kPa abs for a healthy plant, where only the maintenance limit matters.",
+            )
+        fc_maint_limit = st.number_input(
+            "Strainer cleaning limit Δp (kPa)", min_value=CLEAN_FILTER_DROP_KPA + 0.5, value=20.0, step=0.5,
+            key="fc_maint_limit",
+            help="Illustrative value (4 × the 5 kPa clean drop). Use the strainer manufacturer's cleaning limit.",
         )
-        st.caption(
-            "Demo plant: a low-pressure rooftop chilled-water plant (33 kPa abs before the strainer by default), so "
-            "suction is below atmospheric even while the NPSH margin is still met. With this pump's low NPSHr, "
-            "strainer fouling only threatens the NPSH margin at such low pressures; try 105 kPa abs for a healthy plant."
-        )
-        fc_scenario = ("Gradual fouling" if fc_source == FC_UPLOAD else
-                       st.selectbox("Synthetic sensor history", list(fc.SCENARIOS), key="fc_scenario"))
-        st.write(fc.SCENARIOS[fc_scenario]["story"])
-        fc_upstream = fc_in1.number_input(
-            "Pressure before the strainer at design flow (kPa abs)", min_value=5.0, max_value=400.0,
-            value=33.0, step=1.0, key="fc_upstream",
-            help="33 kPa abs matches the rooftop fault plant in Repair simulation. Try 105 kPa abs for a healthy plant.",
-        )
-    fc_maint_limit = fc_in2.number_input(
-        "Strainer maintenance Δp limit (kPa)", min_value=CLEAN_FILTER_DROP_KPA + 0.5, value=20.0, step=0.5,
-        key="fc_maint_limit",
-        help="Illustrative value (4 × the 5 kPa clean drop). Use the strainer manufacturer's cleaning limit.",
+
+    # Page layout, top to bottom. The containers are created now and filled as results become available.
+    panel = st.container(border=True)
+    with panel:
+        p_alert, p_buttons, p_answer, p_verify, p_more = (st.container() for _ in range(5))
+    chart_area = st.container()
+    tab_forecast, tab_check, tab_events, tab_how = st.tabs(
+        ["📊 Forecast table", "✅ Forecast check", "⚠️ Events", "📖 How it works & data"]
     )
 
     # --- Analysis ---------------------------------------------------------
@@ -805,23 +1069,24 @@ with fouling:
     def fc_day_to_date(day_number):
         return fc_today + timedelta(days=float(day_number) - fc_last_day)
 
-    # --- Current state ---------------------------------------------------------
-    if fc_warn_dp <= 0:
-        st.error(
-            f"Even a perfectly clean strainer cannot meet the NPSH margin at {fc_upstream:g} kPa abs upstream "
-            f"(allowable Δp {fc_warn_dp:+.1f} kPa). The cause is upstream pressure, not fouling: check fill pressure "
-            "and the expansion tank."
-        )
-    now1, now2, now3 = st.columns(3)
-    now1.metric("Strainer Δp* now (normalised)", f"{fc_fit.current_kpa:.1f} kPa",
-                f"{fc_fit.current_kpa - CLEAN_FILTER_DROP_KPA:+.1f} vs clean", delta_color="inverse")
-    now2.metric("Fouling rate", f"{fc_fit.rate_per_day * 100:+.2f} %/day")
-    if fc_now_suction <= WATER_VAPOR_PRESSURE_KPA:
-        now3.metric("NPSHa now at design flow", "Not assessed")
-        fc_now_status = "NOT ASSESSED"
-    else:
-        fc_now_status = npsh_assessment(fc_now_npsha, fc_npshr, engineer_margin)[2]
-        now3.metric("NPSHa now at design flow", f"{fc_now_npsha:.2f} m · {fc_now_status}")
+    with p_alert:
+        if fc_warn_dp <= 0:
+            st.error(
+                f"Even a perfectly clean strainer cannot meet the NPSH margin at {fc_upstream:g} kPa abs upstream "
+                f"(allowable Δp {fc_warn_dp:+.1f} kPa). The cause is upstream pressure, not fouling: check fill pressure "
+                "and the expansion tank."
+            )
+    with tab_forecast:
+        now1, now2, now3 = st.columns(3)
+        now1.metric("Strainer Δp* now (normalised)", f"{fc_fit.current_kpa:.1f} kPa",
+                    f"{fc_fit.current_kpa - CLEAN_FILTER_DROP_KPA:+.1f} vs clean", delta_color="inverse")
+        now2.metric("Fouling rate", f"{fc_fit.rate_per_day * 100:+.2f} %/day")
+        if fc_now_suction <= WATER_VAPOR_PRESSURE_KPA:
+            now3.metric("NPSHa now at design flow", "Not assessed")
+            fc_now_status = "NOT ASSESSED"
+        else:
+            fc_now_status = npsh_assessment(fc_now_npsha, fc_npshr, engineer_margin)[2]
+            now3.metric("NPSHa now at design flow", f"{fc_now_npsha:.2f} m · {fc_now_status}")
 
     # --- Forecast table ----------------------------------------------------------
     fc_limits = [
@@ -856,219 +1121,221 @@ with fouling:
         due = date.fromisoformat(row["earliest_date"])
         return f"{row['days_central']:.0f} days ({row['days_earliest']:.0f}–{late_txt})", f"{due:%d %b %Y}"
 
-    st.subheader("Forecast")
-    st.table([
-        dict(zip(("Threshold", "Strainer Δp* limit (kPa)", "Time to reach (95% range)", "Earliest date"),
-                 (row["threshold"], f"{row['dp_limit_kpa']:.1f}", *fc_when(row))))
-        for row in fc_limit_rows
-    ])
+    with tab_forecast:
+        st.table([
+            dict(zip(("Threshold", "Strainer Δp* limit (kPa)", "Time to reach (95% range)", "Earliest date"),
+                     (row["threshold"], f"{row['dp_limit_kpa']:.1f}", *fc_when(row))))
+            for row in fc_limit_rows
+        ])
 
-    # Recommendation: the earliest (fast-rate) crossing of the maintenance limit or NPSH WARNING.
-    fc_candidates = [(row["days_earliest"], row["threshold"]) for row, (_, limit) in zip(fc_limit_rows[:2], fc_limits[:2])
-                     if limit > 0 and row["days_earliest"] is not None]
-    fc_restores = fc_warn_dp > 0
-    if fc_candidates:
-        fc_first_days, fc_first_name = min(fc_candidates)
-        fc_due = fc_day_to_date(fc_last_day + fc_first_days)
-        fc_priority = "URGENT" if fc_first_days == 0 else "HIGH" if fc_first_days <= 14 else "PLANNED"
-        fc_reco = {
-            "action": "Clean and inspect the suction strainer now" if fc_first_days == 0
-            else "Schedule suction strainer cleaning and inspection",
-            "priority": fc_priority, "complete_by": f"{fc_due:%Y-%m-%d}",
-            "days_until_due_earliest": fc_first_days, "driver": fc_first_name,
-            "cleaning_alone_restores_npsh_margin": fc_restores,
-        }
-        if fc_first_days == 0:
-            st.error(f"Clean the strainer now: {fc_first_name.split(' (')[0]} has already been reached.")
+    with p_alert:
+        # Recommendation: the earliest (fast-rate) crossing of the maintenance limit or NPSH WARNING.
+        fc_candidates = [(row["days_earliest"], row["threshold"]) for row, (_, limit) in zip(fc_limit_rows[:2], fc_limits[:2])
+                         if limit > 0 and row["days_earliest"] is not None]
+        fc_restores = fc_warn_dp > 0
+        if fc_candidates:
+            fc_first_days, fc_first_name = min(fc_candidates)
+            fc_due = fc_day_to_date(fc_last_day + fc_first_days)
+            fc_priority = "URGENT" if fc_first_days == 0 else "HIGH" if fc_first_days <= 14 else "PLANNED"
+            fc_reco = {
+                "action": "Clean and inspect the suction strainer now" if fc_first_days == 0
+                else "Schedule suction strainer cleaning and inspection",
+                "priority": fc_priority, "complete_by": f"{fc_due:%Y-%m-%d}",
+                "days_until_due_earliest": fc_first_days, "driver": fc_first_name,
+                "cleaning_alone_restores_npsh_margin": fc_restores,
+            }
+            if fc_first_days == 0:
+                st.error(f"Clean the strainer now: {fc_first_name.split(' (')[0]} has already been reached.")
+            else:
+                st.warning(
+                    f"Schedule strainer cleaning before **{fc_due:%A %d %B %Y}** "
+                    f"(about {fc_first_days:.0f} days, earliest estimate). Driver: {fc_first_name}."
+                    + ("" if fc_restores else " Cleaning alone will not restore the NPSH margin at this upstream pressure.")
+                )
         else:
-            st.warning(
-                f"Schedule strainer cleaning before **{fc_due:%A %d %B %Y}** "
-                f"(about {fc_first_days:.0f} days, earliest estimate). Driver: {fc_first_name}."
-                + ("" if fc_restores else " Cleaning alone will not restore the NPSH margin at this upstream pressure.")
-            )
-    else:
-        fc_reco = {"action": "No strainer cleaning forecast within 180 days; keep trending",
-                   "priority": "NONE", "complete_by": None, "days_until_due_earliest": None,
-                   "driver": None, "cleaning_alone_restores_npsh_margin": fc_restores}
-        st.success("No maintenance or NPSH threshold is forecast within 180 days at the current fouling rate.")
-    if not fc_restores:
-        # The strainer is not the limiting factor: restoring system pressure comes first.
-        fc_reco = {
-            "action": "Restore upstream system pressure (fill pressure, expansion tank); strainer cleaning alone cannot restore the NPSH margin",
-            "priority": "URGENT" if fc_now_status in ("WARNING", "CRITICAL", "NOT ASSESSED") else "HIGH",
-            "complete_by": f"{fc_today:%Y-%m-%d}", "days_until_due_earliest": 0.0,
-            "driver": "NPSH margin cannot be met even with a clean strainer",
-            "cleaning_alone_restores_npsh_margin": False,
-            "strainer_cleaning_due": fc_reco["complete_by"],
-        }
+            fc_reco = {"action": "No strainer cleaning forecast within 180 days; keep trending",
+                       "priority": "NONE", "complete_by": None, "days_until_due_earliest": None,
+                       "driver": None, "cleaning_alone_restores_npsh_margin": fc_restores}
+            st.success("No maintenance or NPSH threshold is forecast within 180 days at the current fouling rate.")
+        if not fc_restores:
+            # The strainer is not the limiting factor: restoring system pressure comes first.
+            fc_reco = {
+                "action": "Restore upstream system pressure (fill pressure, expansion tank); strainer cleaning alone cannot restore the NPSH margin",
+                "priority": "URGENT" if fc_now_status in ("WARNING", "CRITICAL", "NOT ASSESSED") else "HIGH",
+                "complete_by": f"{fc_today:%Y-%m-%d}", "days_until_due_earliest": 0.0,
+                "driver": "NPSH margin cannot be met even with a clean strainer",
+                "cleaning_alone_restores_npsh_margin": False,
+                "strainer_cleaning_due": fc_reco["complete_by"],
+            }
 
-    # --- Chart ------------------------------------------------------------------------
-    fc_hourly = pd.DataFrame({
-        "time": [fc_start + timedelta(hours=int(h)) for h in fc_log["hour"]],
-        "Raw Δp (kPa)": fc_log["dp_kpa"], "Normalised Δp* (kPa)": fc_norm,
-    })
-    fc_daily_df = pd.DataFrame({
-        "time": [datetime.combine(fc_day_to_date(d), time(12)) for d in range(len(fc_daily))],
-        "Δp*": fc_daily,
-    })
-    fc_horizon = 60
-    fc_future = np.arange(0, fc_horizon + 1)
-    fc_proj = pd.DataFrame({
-        "time": [datetime.combine(fc_day_to_date(fc_last_day + d), time(12)) for d in fc_future],
-        "fit": fc_fit.current_kpa * np.exp(fc_fit.rate_per_day * fc_future),
-        "low": fc_fit.current_kpa * np.exp(fc_rate_lo * fc_future),
-        "high": fc_fit.current_kpa * np.exp(fc_rate_hi * fc_future),
-    })
-    fc_rules = pd.DataFrame({
-        "limit": [fc_maint_limit, fc_warn_dp, fc_crit_dp],
-        "Threshold": ["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
-    })
-    fc_rules = fc_rules[fc_rules["limit"] > 0]
-    fc_ymax = float(max(fc_proj["high"].max(), np.nanmax(fc_log["dp_kpa"]), *fc_rules["limit"], 10)) * 1.08
-    fc_ymax = min(fc_ymax, 3 * max(fc_rules["limit"].max(), fc_fit.current_kpa))
-    y_scale = alt.Scale(domain=[0, fc_ymax], clamp=True)
-
-    raw_layer = alt.Chart(fc_hourly).mark_circle(size=6, opacity=0.18, color="#8a8f98").encode(
-        x=alt.X("time:T", title=None), y=alt.Y("Raw Δp (kPa):Q", title="Strainer Δp (kPa)", scale=y_scale),
-        tooltip=[alt.Tooltip("time:T", format="%d %b %H:%M"), alt.Tooltip("Raw Δp (kPa):Q", format=".1f")],
-    )
-    daily_layer = alt.Chart(fc_daily_df).mark_line(point=alt.OverlayMarkDef(size=18), color="#1f6fb2").encode(
-        x="time:T", y=alt.Y("Δp*:Q", scale=y_scale),
-        tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("Δp*:Q", title="Daily Δp* (kPa)", format=".2f")],
-    )
-    band_layer = alt.Chart(fc_proj).mark_area(opacity=0.18, color="#e07b00").encode(
-        x="time:T", y=alt.Y("low:Q", scale=y_scale), y2="high:Q",
-    )
-    fit_layer = alt.Chart(fc_proj).mark_line(strokeDash=[6, 4], color="#e07b00").encode(
-        x="time:T", y=alt.Y("fit:Q", scale=y_scale),
-        tooltip=[alt.Tooltip("time:T", format="%d %b %Y"), alt.Tooltip("fit:Q", title="Forecast Δp* (kPa)", format=".1f")],
-    )
-    rule_layer = alt.Chart(fc_rules).mark_rule(strokeWidth=1.5).encode(
-        y=alt.Y("limit:Q", scale=y_scale),
-        color=alt.Color("Threshold:N", scale=alt.Scale(
-            domain=["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
-            range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
-        tooltip=["Threshold", alt.Tooltip("limit:Q", format=".1f")],
-    )
-    today_layer = alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_today, time(23, 59))]})).mark_rule(
-        color="#444", strokeDash=[2, 2]).encode(x="time:T")
-    fc_layers = [raw_layer, band_layer, daily_layer, fit_layer, rule_layer, today_layer]
-    if len(fc_spikes):
-        spike_df = fc_hourly.iloc[fc_spikes][["time", "Normalised Δp* (kPa)"]]
-        fc_layers.append(alt.Chart(spike_df).mark_point(shape="cross", size=90, color="#c62828", filled=True).encode(
-            x="time:T", y=alt.Y("Normalised Δp* (kPa):Q", scale=y_scale),
-            tooltip=[alt.Tooltip("time:T", title="Flagged reading", format="%d %b %H:%M")]))
-    st.altair_chart(alt.layer(*fc_layers).properties(height=360), width="stretch")
-    st.caption(
-        "Grey dots: raw hourly Δp, which swings with flow. Blue: daily median of the flow-normalised Δp* = "
-        "Δp·(Q_ref/Q)². Orange: exponential trend with its 95% statistical range. Red crosses: readings flagged as "
-        "anomalies and excluded. The dotted vertical line is today."
-    )
-
-    # --- Anomalies -----------------------------------------------------------------
-    st.subheader("Events detected in the sensor log")
-    fc_events = []
-    for idx in fc_spikes:
-        when = fc_hourly["time"].iloc[idx]
-        fc_events.append({
-            "When": f"{when:%d %b %H:%M}", "Type": "Isolated reading (likely sensor glitch)",
-            "Evidence": f"Δp* {fc_norm[idx]:.1f} kPa vs neighbouring hours ≈ {np.nanmedian(fc_norm[max(0, idx - 12):idx + 12]):.1f} kPa",
-            "Action": "Excluded from the trend. Check the suction pressure transmitter and its wiring.",
+    with chart_area:
+        st.markdown("#### Strainer pressure drop: history and forecast")
+        # --- Chart ------------------------------------------------------------------------
+        fc_hourly = pd.DataFrame({
+            "time": [fc_start + timedelta(hours=int(h)) for h in fc_log["hour"]],
+            "Raw Δp (kPa)": fc_log["dp_kpa"], "Normalised Δp* (kPa)": fc_norm,
         })
-    for d in fc_steps:
-        if d in fc_drops:
+        fc_daily_df = pd.DataFrame({
+            "time": [datetime.combine(fc_day_to_date(d), time(12)) for d in range(len(fc_daily))],
+            "Δp*": fc_daily,
+        })
+        fc_horizon = 60
+        fc_future = np.arange(0, fc_horizon + 1)
+        fc_proj = pd.DataFrame({
+            "time": [datetime.combine(fc_day_to_date(fc_last_day + d), time(12)) for d in fc_future],
+            "fit": fc_fit.current_kpa * np.exp(fc_fit.rate_per_day * fc_future),
+            "low": fc_fit.current_kpa * np.exp(fc_rate_lo * fc_future),
+            "high": fc_fit.current_kpa * np.exp(fc_rate_hi * fc_future),
+        })
+        fc_rules = pd.DataFrame({
+            "limit": [fc_maint_limit, fc_warn_dp, fc_crit_dp],
+            "Threshold": ["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
+        })
+        fc_rules = fc_rules[fc_rules["limit"] > 0]
+        fc_ymax = float(max(fc_proj["high"].max(), np.nanmax(fc_log["dp_kpa"]), *fc_rules["limit"], 10)) * 1.08
+        fc_ymax = min(fc_ymax, 3 * max(fc_rules["limit"].max(), fc_fit.current_kpa))
+        y_scale = alt.Scale(domain=[0, fc_ymax], clamp=True)
+
+        raw_layer = alt.Chart(fc_hourly).mark_circle(size=6, opacity=0.18, color="#8a8f98").encode(
+            x=alt.X("time:T", title=None), y=alt.Y("Raw Δp (kPa):Q", title="Strainer Δp (kPa)", scale=y_scale),
+            tooltip=[alt.Tooltip("time:T", format="%d %b %H:%M"), alt.Tooltip("Raw Δp (kPa):Q", format=".1f")],
+        )
+        daily_layer = alt.Chart(fc_daily_df).mark_line(point=alt.OverlayMarkDef(size=18), color="#1f6fb2").encode(
+            x="time:T", y=alt.Y("Δp*:Q", scale=y_scale),
+            tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("Δp*:Q", title="Daily Δp* (kPa)", format=".2f")],
+        )
+        band_layer = alt.Chart(fc_proj).mark_area(opacity=0.18, color="#e07b00").encode(
+            x="time:T", y=alt.Y("low:Q", scale=y_scale), y2="high:Q",
+        )
+        fit_layer = alt.Chart(fc_proj).mark_line(strokeDash=[6, 4], color="#e07b00").encode(
+            x="time:T", y=alt.Y("fit:Q", scale=y_scale),
+            tooltip=[alt.Tooltip("time:T", format="%d %b %Y"), alt.Tooltip("fit:Q", title="Forecast Δp* (kPa)", format=".1f")],
+        )
+        rule_layer = alt.Chart(fc_rules).mark_rule(strokeWidth=1.5).encode(
+            y=alt.Y("limit:Q", scale=y_scale),
+            color=alt.Color("Threshold:N", scale=alt.Scale(
+                domain=["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
+                range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
+            tooltip=["Threshold", alt.Tooltip("limit:Q", format=".1f")],
+        )
+        today_layer = alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_today, time(23, 59))]})).mark_rule(
+            color="#444", strokeDash=[2, 2]).encode(x="time:T")
+        fc_layers = [raw_layer, band_layer, daily_layer, fit_layer, rule_layer, today_layer]
+        if len(fc_spikes):
+            spike_df = fc_hourly.iloc[fc_spikes][["time", "Normalised Δp* (kPa)"]]
+            fc_layers.append(alt.Chart(spike_df).mark_point(shape="cross", size=90, color="#c62828", filled=True).encode(
+                x="time:T", y=alt.Y("Normalised Δp* (kPa):Q", scale=y_scale),
+                tooltip=[alt.Tooltip("time:T", title="Flagged reading", format="%d %b %H:%M")]))
+        st.altair_chart(alt.layer(*fc_layers).properties(height=360), width="stretch")
+        st.caption(
+            "Grey dots: raw hourly Δp, which swings with flow. Blue: daily median of the flow-normalised Δp* = "
+            "Δp·(Q_ref/Q)². Orange: exponential trend with its 95% statistical range. Red crosses: readings flagged as "
+            "anomalies and excluded. The dotted vertical line is today."
+        )
+
+    with tab_events:
+        # --- Anomalies -----------------------------------------------------------------
+        fc_events = []
+        for idx in fc_spikes:
+            when = fc_hourly["time"].iloc[idx]
             fc_events.append({
-                "When": f"{fc_day_to_date(d):%d %b}", "Type": "Sudden drop (likely a strainer cleaning)",
-                "Evidence": f"Daily Δp* fell to {fc_daily[d]:.1f} kPa from ≈ {np.nanmedian(fc_daily[d - 3:d]):.1f} kPa",
-                "Action": "Trend restarted from this day. Confirm against the maintenance log; if nobody cleaned the "
-                          "strainer, check for a torn screen, an open bypass or a sensor change.",
+                "When": f"{when:%d %b %H:%M}", "Type": "Isolated reading (likely sensor glitch)",
+                "Evidence": f"Δp* {fc_norm[idx]:.1f} kPa vs neighbouring hours ≈ {np.nanmedian(fc_norm[max(0, idx - 12):idx + 12]):.1f} kPa",
+                "Action": "Excluded from the trend. Check the suction pressure transmitter and its wiring.",
             })
-            continue
-        fc_events.append({
-            "When": f"{fc_day_to_date(d):%d %b}", "Type": "Sudden step increase (debris event)",
-            "Evidence": f"Daily Δp* jumped to {fc_daily[d]:.1f} kPa from ≈ {np.nanmedian(fc_daily[d - 3:d]):.1f} kPa",
-            "Action": "Trend refitted from this day. Inspect the strainer and check for recent pipe work or flushing.",
+        for d in fc_steps:
+            if d in fc_drops:
+                fc_events.append({
+                    "When": f"{fc_day_to_date(d):%d %b}", "Type": "Sudden drop (likely a strainer cleaning)",
+                    "Evidence": f"Daily Δp* fell to {fc_daily[d]:.1f} kPa from ≈ {np.nanmedian(fc_daily[d - 3:d]):.1f} kPa",
+                    "Action": "Trend restarted from this day. Confirm against the maintenance log; if nobody cleaned the "
+                              "strainer, check for a torn screen, an open bypass or a sensor change.",
+                })
+                continue
+            fc_events.append({
+                "When": f"{fc_day_to_date(d):%d %b}", "Type": "Sudden step increase (debris event)",
+                "Evidence": f"Daily Δp* jumped to {fc_daily[d]:.1f} kPa from ≈ {np.nanmedian(fc_daily[d - 3:d]):.1f} kPa",
+                "Action": "Trend refitted from this day. Inspect the strainer and check for recent pipe work or flushing.",
+            })
+        if fc_events:
+            st.table(fc_events)
+        else:
+            st.write("No anomalies detected.")
+        st.caption(
+            f"Trend fitted on {fc_fit.days_used} daily medians from {fc_day_to_date(fc_fit.start_day):%d %b} "
+            "(after the most recent step change, at most 21 days)."
+        )
+
+    with tab_check:
+        st.caption("Backtest: hide the most recent days, run exactly the same method on the rest, and compare its "
+                   "forecast with what the sensors then showed.")
+        # --- Backtest -------------------------------------------------------------------
+        fc_bt_options = [h for h in (7, 14, 21) if len(fc_daily) - h >= 8] or [7]
+        fc_bt_horizon = st.select_slider(
+            "Days hidden from the forecast", options=fc_bt_options, value=14 if 14 in fc_bt_options else fc_bt_options[-1],
+            key="fc_bt_horizon",
+            help="The past forecast sees only the earlier days, including its own step and spike detection.",
+        )
+        fc_bt = fc.backtest(fc_daily, horizon_days=fc_bt_horizon)
+        bt1, bt2, bt3 = st.columns(3)
+        bt1.metric(f"Error after {fc_bt_horizon} days", f"{fc_bt.end_error_pct:+.1f} %",
+                   help="(forecast − observed) / observed Δp* on the last hidden day. Positive = forecast was cautious.")
+        bt2.metric("Mean absolute error", f"{fc_bt.mape_pct:.1f} %", help="Averaged over every hidden day.")
+        bt3.metric("Days inside the 95 % range", f"{fc_bt.coverage_pct:.0f} %",
+                   help="The range combines the uncertainty of the fitted rate with day-to-day scatter.")
+        fc_bt_from = fc_bt.train_days - 1
+        if fc_bt.recent_step:
+            st.warning(
+                "A step change was detected in the last few days before the past forecast was made, so too few days "
+                "followed the event to fit a reliable trend. In live use this case is an immediate clean-now alert, not a date."
+            )
+        elif any(d > fc_bt_from for d in fc_steps):
+            fc_bt_event = min(d for d in fc_steps if d > fc_bt_from)
+            fc_bt_kind = "cleaning" if fc_bt_event in fc_drops else "sudden event"
+            st.warning(
+                f"The {fc_bt_kind} on {fc_day_to_date(fc_bt_event):%d %b} happened after the past forecast was made, "
+                "and no trend can predict it, so this comparison says little about the method. Hide fewer days, or "
+                "note that the live forecast re-fits after every step change."
+            )
+        elif abs(fc_bt.end_error_pct) <= 10:
+            st.success(
+                f"A forecast made on {fc_day_to_date(fc_bt_from):%d %b} predicted today's strainer Δp* within "
+                f"{abs(fc_bt.end_error_pct):.0f} %."
+            )
+        fc_bt_past = pd.DataFrame({
+            "time": [datetime.combine(fc_day_to_date(d), time(12)) for d in range(len(fc_daily))],
+            "Δp*": fc_daily, "Series": ["Seen by the past forecast" if d <= fc_bt_from else "Hidden (observed later)"
+                                        for d in range(len(fc_daily))],
         })
-    if fc_events:
-        st.table(fc_events)
-    else:
-        st.write("No anomalies detected.")
-    st.caption(
-        f"Trend fitted on {fc_fit.days_used} daily medians from {fc_day_to_date(fc_fit.start_day):%d %b} "
-        "(after the most recent step change, at most 21 days)."
-    )
+        fc_bt_proj = pd.DataFrame({
+            "time": [datetime.combine(fc_day_to_date(fc_bt_from + d), time(12)) for d in range(1, fc_bt_horizon + 1)],
+            "forecast": fc_bt.predicted, "low": fc_bt.low, "high": fc_bt.high,
+        })
+        bt_y = alt.Scale(zero=False)
+        bt_chart = alt.layer(
+            alt.Chart(fc_bt_proj).mark_area(opacity=0.18, color="#e07b00").encode(
+                x=alt.X("time:T", title=None), y=alt.Y("low:Q", scale=bt_y, title="Daily Δp* (kPa)"), y2="high:Q"),
+            alt.Chart(fc_bt_past).mark_line(point=alt.OverlayMarkDef(size=18)).encode(
+                x="time:T", y=alt.Y("Δp*:Q", scale=bt_y),
+                color=alt.Color("Series:N", scale=alt.Scale(
+                    domain=["Seen by the past forecast", "Hidden (observed later)"], range=["#1f6fb2", "#111827"]),
+                    legend=alt.Legend(orient="bottom", title=None, columns=2)),
+                tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("Δp*:Q", format=".2f"), "Series:N"]),
+            alt.Chart(fc_bt_proj).mark_line(strokeDash=[6, 4], color="#e07b00").encode(
+                x="time:T", y=alt.Y("forecast:Q", scale=bt_y),
+                tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("forecast:Q", title="Past forecast (kPa)", format=".2f")]),
+            alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_day_to_date(fc_bt_from), time(23, 59))]})).mark_rule(
+                color="#444", strokeDash=[2, 2]).encode(x="time:T"),
+        ).properties(height=280)
+        st.altair_chart(bt_chart, width="stretch")
+        st.caption(
+            "Dotted vertical line: the day the past forecast was made. Orange: what it predicted, with its 95 % range. "
+            "Black: what the sensors then showed. Try **Linear fouling (model mismatch)**: the data do not "
+            "follow the exponential model, yet the two-week forecast stays close."
+        )
 
-    # --- Backtest -------------------------------------------------------------------
-    st.subheader("Would this forecast have worked? (backtest)")
-    st.write(
-        "Hide the most recent days of the log, run exactly the same method on what is left, and compare its "
-        "forecast with what the sensors then showed."
-    )
-    fc_bt_options = [h for h in (7, 14, 21) if len(fc_daily) - h >= 8] or [7]
-    fc_bt_horizon = st.select_slider(
-        "Days hidden from the forecast", options=fc_bt_options, value=14 if 14 in fc_bt_options else fc_bt_options[-1],
-        key="fc_bt_horizon",
-        help="The past forecast sees only the earlier days, including its own step and spike detection.",
-    )
-    fc_bt = fc.backtest(fc_daily, horizon_days=fc_bt_horizon)
-    bt1, bt2, bt3 = st.columns(3)
-    bt1.metric(f"Error after {fc_bt_horizon} days", f"{fc_bt.end_error_pct:+.1f} %",
-               help="(forecast − observed) / observed Δp* on the last hidden day. Positive = forecast was cautious.")
-    bt2.metric("Mean absolute error", f"{fc_bt.mape_pct:.1f} %", help="Averaged over every hidden day.")
-    bt3.metric("Days inside the 95 % range", f"{fc_bt.coverage_pct:.0f} %",
-               help="The range combines the uncertainty of the fitted rate with day-to-day scatter.")
-    fc_bt_from = fc_bt.train_days - 1
-    if fc_bt.recent_step:
-        st.warning(
-            "A step change was detected in the last few days before the past forecast was made, so too few days "
-            "followed the event to fit a reliable trend. In live use this case is an immediate clean-now alert, not a date."
-        )
-    elif any(d > fc_bt_from for d in fc_steps):
-        fc_bt_event = min(d for d in fc_steps if d > fc_bt_from)
-        fc_bt_kind = "cleaning" if fc_bt_event in fc_drops else "sudden event"
-        st.warning(
-            f"The {fc_bt_kind} on {fc_day_to_date(fc_bt_event):%d %b} happened after the past forecast was made, "
-            "and no trend can predict it, so this comparison says little about the method. Hide fewer days, or "
-            "note that the live forecast re-fits after every step change."
-        )
-    elif abs(fc_bt.end_error_pct) <= 10:
-        st.success(
-            f"A forecast made on {fc_day_to_date(fc_bt_from):%d %b} predicted today's strainer Δp* within "
-            f"{abs(fc_bt.end_error_pct):.0f} %."
-        )
-    fc_bt_past = pd.DataFrame({
-        "time": [datetime.combine(fc_day_to_date(d), time(12)) for d in range(len(fc_daily))],
-        "Δp*": fc_daily, "Series": ["Seen by the past forecast" if d <= fc_bt_from else "Hidden (observed later)"
-                                    for d in range(len(fc_daily))],
-    })
-    fc_bt_proj = pd.DataFrame({
-        "time": [datetime.combine(fc_day_to_date(fc_bt_from + d), time(12)) for d in range(1, fc_bt_horizon + 1)],
-        "forecast": fc_bt.predicted, "low": fc_bt.low, "high": fc_bt.high,
-    })
-    bt_y = alt.Scale(zero=False)
-    bt_chart = alt.layer(
-        alt.Chart(fc_bt_proj).mark_area(opacity=0.18, color="#e07b00").encode(
-            x=alt.X("time:T", title=None), y=alt.Y("low:Q", scale=bt_y, title="Daily Δp* (kPa)"), y2="high:Q"),
-        alt.Chart(fc_bt_past).mark_line(point=alt.OverlayMarkDef(size=18)).encode(
-            x="time:T", y=alt.Y("Δp*:Q", scale=bt_y),
-            color=alt.Color("Series:N", scale=alt.Scale(
-                domain=["Seen by the past forecast", "Hidden (observed later)"], range=["#1f6fb2", "#111827"]),
-                legend=alt.Legend(orient="bottom", title=None, columns=2)),
-            tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("Δp*:Q", format=".2f"), "Series:N"]),
-        alt.Chart(fc_bt_proj).mark_line(strokeDash=[6, 4], color="#e07b00").encode(
-            x="time:T", y=alt.Y("forecast:Q", scale=bt_y),
-            tooltip=[alt.Tooltip("time:T", format="%d %b"), alt.Tooltip("forecast:Q", title="Past forecast (kPa)", format=".2f")]),
-        alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_day_to_date(fc_bt_from), time(23, 59))]})).mark_rule(
-            color="#444", strokeDash=[2, 2]).encode(x="time:T"),
-    ).properties(height=280)
-    st.altair_chart(bt_chart, width="stretch")
-    st.caption(
-        "Dotted vertical line: the day the past forecast was made. Orange: what it predicted, with its 95 % range. "
-        "Black: what the sensors then showed. Try **Linear fouling (model mismatch)**: the data do not "
-        "follow the exponential model, yet the two-week forecast stays close."
-    )
-
-    with st.expander("How the forecast works and what it assumes"):
+    with tab_how:
+        st.markdown("**How the forecast works and what it assumes**")
         st.markdown(
             "1. **Normalise for flow.** Strainer loss follows Δp = K·Q², so every hourly reading is converted to the "
             f"design flow ({DESIGN_FLOW_LPS:g} L/s): Δp* = Δp·(Q_ref/Q)². Readings below 30% of design flow are dropped.\n"
@@ -1082,113 +1349,54 @@ with fouling:
             "no change in water temperature. Real fouling can accelerate or stop, so the forecast must be re-run as new data arrive. "
             "This is a maintenance-planning aid, not a guarantee."
         )
-    # --- Post-maintenance verification -------------------------------------------
-    st.subheader("Verify the maintenance")
-    st.write(
-        "After cleaning, record one strainer Δp reading **and the flow at that moment**. The reading is "
-        "flow-normalised and compared with the clean baseline within the measurement uncertainty of your instruments."
-    )
-    st.caption(
-        "This band is computed from instrument accuracy, so it differs from the illustrative ±2 kPa tolerance used "
-        "by the quick diagnosis tabs. The NPSH result below assumes the pressure before the strainer is unchanged."
-    )
-    with st.form("verify_form"):
-        v1, v2 = st.columns(2)
-        v_dp = v1.number_input("Post-cleaning strainer Δp (kPa)", min_value=0.0, value=None, step=0.1,
-                               placeholder="e.g. 5.1", key="verify_dp")
-        v_flow = v2.number_input("Flow during that reading (L/s)", min_value=0.0, value=None, step=0.1,
-                                 placeholder="e.g. 21.0", key="verify_flow")
-        v3, v4 = st.columns(2)
-        v_baseline = v3.number_input(
-            "Clean baseline Δp* at design flow (kPa)", min_value=0.1, value=CLEAN_FILTER_DROP_KPA, step=0.1,
-            key="verify_baseline",
-            help="Demo value. In the field, use the flow-normalised Δp measured after commissioning or the last good cleaning.",
+        st.caption(
+            ("USER-SUPPLIED sensor log · analysed in memory, not saved · the app cannot confirm it comes from this plant · "
+             "dates are relative to the last reading in the file · " if fc_upload else
+             "SYNTHETIC sensor log · 60 days of hourly readings generated by the app, not field data · ")
+            + f"Lowara demo/reference pump · design flow {DESIGN_FLOW_LPS:g} L/s · water at 20 °C"
         )
-        v_repeat = v4.number_input(
-            "Baseline repeatability, 1σ (kPa)", min_value=0.0, value=0.0, step=0.05, key="verify_repeat",
-            help="Spread of past post-cleaning Δp* readings for this strainer. 0 = instrument uncertainty only.",
-        )
-        with st.expander("Instrument accuracy (from the datasheets)"):
-            v_method = st.radio("Δp measured with", (vf.TWO_ABSOLUTE, vf.DIFFERENTIAL), key="verify_method")
-            i1, i2, i3 = st.columns(3)
-            v_span = i1.number_input("Pressure span (kPa)", min_value=1.0, value=400.0, step=1.0, key="verify_span",
-                                     help="Span of each absolute transmitter, or of the DP transmitter if one is used.")
-            v_acc = i2.number_input("Pressure ± % span", min_value=0.0, value=0.1, step=0.01,
-                                    format="%.3f", key="verify_acc", help="Transmitter accuracy, ± % of span.")
-            v_qacc = i3.number_input("Flow ± % reading", min_value=0.0, value=0.5, step=0.1,
-                                     key="verify_qacc", help="Flow meter accuracy, ± % of reading.")
-            st.caption(
-                "Defaults are example datasheet figures (0–400 kPa abs transmitters at ±0.1 % of span, flow meter at "
-                "±0.5 % of reading), not measurements of a real installation. Accuracy limits are treated as rectangular "
-                "(GUM), and the result is reported at k = 2 (about 95 %). A single DP transmitter across the strainer "
-                "gives a much tighter band than subtracting two absolute transmitters."
-            )
-        v_submit = st.form_submit_button("Verify maintenance")
-    if v_submit:
-        st.session_state.pop("verification", None)
-        v_problem_msg = vf.reading_problem(
-            v_dp, v_flow, DESIGN_FLOW_LPS, pressure_before_kpa_abs=fc_upstream,
-            max_flow_lps=LOWARA_CURVE[-1][0] / 3.6,
-        )
-        if v_problem_msg:
-            st.error("Reading not accepted — " + v_problem_msg)
-        else:
-            try:
-                v_result = vf.verify_cleaning(
-                    v_dp, v_flow, DESIGN_FLOW_LPS, v_baseline, fc_maint_limit,
-                    vf.Instruments(v_method, v_span, v_acc, v_qacc),
-                    dp_star_before_kpa=fc_fit.current_kpa, baseline_repeatability_kpa=v_repeat,
+    with p_verify:
+        verification = st.session_state.get("verification")
+        if verification and (verification["scenario"], verification["upstream"], verification.get("maint_limit")) != (
+                fc_scenario, fc_upstream, fc_maint_limit):
+            verification = None  # computed for a different forecast or maintenance limit: re-verify
+        verification_summary = None
+        if verification:
+            v_res = verification["result"]
+            v_suction = fc_upstream - v_res.dp_star_kpa
+            v_problem = npsha_input_problem(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
+            v_npsha = available_npsh(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
+            v_status = "NOT ASSESSED" if v_problem else npsh_assessment(v_npsha, fc_npshr, engineer_margin)[2]
+            show = {"RESTORED": st.success, "IMPROVED, NOT CLEAN": st.warning}.get(v_res.verdict, st.error)
+            show(f"**Strainer: {v_res.verdict}** — {v_res.message}")
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Δp* after cleaning", f"{v_res.dp_star_kpa:.2f} kPa",
+                      None if v_res.reduction_pct is None else f"{-v_res.reduction_pct:+.0f}% vs before",
+                      # A large drop is not good news when the reading is suspiciously low.
+                      delta_color="off" if v_res.verdict == "SUSPICIOUSLY LOW" else "inverse")
+            r2.metric(f"Clean band around {v_res.baseline_kpa:.2f} kPa", f"± {v_res.expanded_uncertainty_kpa:.2f} kPa",
+                      help="Expanded measurement uncertainty, k = 2 (about 95 %).")
+            r3.metric(f"NPSHa at design flow · {v_status}", "Not assessed" if v_problem else f"{v_npsha:.2f} m")
+            st.write(f"**Next:** {v_res.next_check}")
+            if v_suction < ATMOSPHERIC_KPA_ABS:
+                st.info(
+                    f"Suction at design flow would be {v_suction:.1f} kPa abs, below atmospheric. Strainer cleaning alone "
+                    "cannot fix the loop's low system pressure: check fill pressure and the expansion tank."
                 )
-                st.session_state["verification"] = {
-                    "scenario": fc_scenario, "upstream": fc_upstream, "maint_limit": fc_maint_limit,
-                    "result": v_result,
-                    "dp_kpa": v_dp, "flow_lps": v_flow, "method": v_method,
-                }
-            except ValueError as exc:
-                # Our own validation messages only; never a raw traceback.
-                st.error("Reading not accepted — " + str(exc))
-
-    verification = st.session_state.get("verification")
-    if verification and (verification["scenario"], verification["upstream"], verification.get("maint_limit")) != (
-            fc_scenario, fc_upstream, fc_maint_limit):
-        verification = None  # computed for a different forecast or maintenance limit: re-verify
-    verification_summary = None
-    if verification:
-        v_res = verification["result"]
-        v_suction = fc_upstream - v_res.dp_star_kpa
-        v_problem = npsha_input_problem(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
-        v_npsha = available_npsh(v_suction, fc_q_m3h, LOWARA_SUCTION_NOZZLE_MM)
-        v_status = "NOT ASSESSED" if v_problem else npsh_assessment(v_npsha, fc_npshr, engineer_margin)[2]
-        show = {"RESTORED": st.success, "IMPROVED, NOT CLEAN": st.warning}.get(v_res.verdict, st.error)
-        show(f"**Strainer: {v_res.verdict}** — {v_res.message}")
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Δp* after cleaning", f"{v_res.dp_star_kpa:.2f} kPa",
-                  None if v_res.reduction_pct is None else f"{-v_res.reduction_pct:+.0f}% vs before",
-                  # A large drop is not good news when the reading is suspiciously low.
-                  delta_color="off" if v_res.verdict == "SUSPICIOUSLY LOW" else "inverse")
-        r2.metric(f"Clean band around {v_res.baseline_kpa:.2f} kPa", f"± {v_res.expanded_uncertainty_kpa:.2f} kPa",
-                  help="Expanded measurement uncertainty, k = 2 (about 95 %).")
-        r3.metric(f"NPSHa at design flow · {v_status}", "Not assessed" if v_problem else f"{v_npsha:.2f} m")
-        st.write(f"**Next:** {v_res.next_check}")
-        if v_suction < ATMOSPHERIC_KPA_ABS:
-            st.info(
-                f"Suction at design flow would be {v_suction:.1f} kPa abs, below atmospheric. Strainer cleaning alone "
-                "cannot fix the loop's low system pressure: check fill pressure and the expansion tank."
-            )
-        verification_summary = {
-            "strainer_verdict": v_res.verdict,
-            "measured_dp_kpa": verification["dp_kpa"], "measured_flow_lps": verification["flow_lps"],
-            "normalised_dp_after_kpa": round(v_res.dp_star_kpa, 3),
-            "clean_baseline_kpa": v_res.baseline_kpa,
-            "expanded_uncertainty_k2_kpa": round(v_res.expanded_uncertainty_kpa, 3),
-            "instrument_method": verification["method"],
-            "reduction_vs_before_pct": None if v_res.reduction_pct is None else round(v_res.reduction_pct, 1),
-            "npsha_after_m": None if v_problem else round(v_npsha, 3),
-            "npsh_status_after": v_status,
-            "suction_after_kpa_abs": round(v_suction, 2),
-            "message": v_res.message, "next_check": v_res.next_check,
-            "note": "Post-maintenance reading entered by the user; instrument accuracies are datasheet inputs.",
-        }
+            verification_summary = {
+                "strainer_verdict": v_res.verdict,
+                "measured_dp_kpa": verification["dp_kpa"], "measured_flow_lps": verification["flow_lps"],
+                "normalised_dp_after_kpa": round(v_res.dp_star_kpa, 3),
+                "clean_baseline_kpa": v_res.baseline_kpa,
+                "expanded_uncertainty_k2_kpa": round(v_res.expanded_uncertainty_kpa, 3),
+                "instrument_method": verification["method"],
+                "reduction_vs_before_pct": None if v_res.reduction_pct is None else round(v_res.reduction_pct, 1),
+                "npsha_after_m": None if v_problem else round(v_npsha, 3),
+                "npsh_status_after": v_status,
+                "suction_after_kpa_abs": round(v_suction, 2),
+                "message": v_res.message, "next_check": v_res.next_check,
+                "note": "Post-maintenance reading entered by the user; instrument accuracies are datasheet inputs.",
+            }
 
     # Structured, JSON-safe summary shared with Detective Intelligence and the AI layer.
     forecast_summary = {
@@ -1228,370 +1436,413 @@ with fouling:
         "post_maintenance_verification": verification_summary,
     }
 
-    fc_export = fc_log.assign(normalised_dp_kpa=fc_norm).round(3)
-    fc_export.insert(0, "timestamp", pd.to_datetime(fc_hourly["time"]).dt.strftime("%Y-%m-%d %H:%M"))
-    st.download_button(
-        "Download the hourly log used (CSV)" if fc_upload else "Download synthetic sensor log (CSV)",
-        data=fc_export.to_csv(index=False),
-        file_name=("pump_detective_hourly_log.csv" if fc_upload else
-                   f"pump_detective_synthetic_log_{fc_scenario.lower().replace(' ', '_')}.csv"),
-        mime="text/csv", key="fc_download",
-        help="Includes timestamps, so the file can be uploaded again with 'Upload my own sensor log'.",
-    )
-
-
-with part_load:
-    st.subheader("Secondary pump · Part-load / VFD")
-    st.caption("Educational operating snapshot · Water at 20 °C · Independent of the primary-pump tabs")
-    st.write(
-        "Enter flow, speed and pressures for the same secondary-pump operating condition. "
-        "Floor demand is context only: 50% active floors does not imply 50% flow or speed."
-    )
-    active_floors = st.slider("Active floors / cooling-demand context (%)", 0, 100, 50, 5, key="vfd_floors")
-    st.caption(f"{active_floors}% active floors is recorded as context; it does not drive any calculation.")
-    design_q = st.number_input(
-        "Secondary design/reference flow (L/s)", min_value=0.1, value=42.4, step=0.1,
-        key="vfd_design_q",
-        help="42.4 L/s is the project-preview set reference. Confirm the schedule and whether the flow is per pump or per set.",
-    )
-    st.caption("Use the same pump or set basis for reference flow and operating flow. Defaults are demo inputs.")
-    actual_q = st.number_input("Operating flow (L/s)", min_value=0.0, value=21.2, step=0.1, key="vfd_actual_q",
-                               on_change=invalidate_secondary_references, kwargs={"flow_changed": True})
-    speed_pct = st.slider("Actual rotational speed (% of reference speed)", 10, 100, 75, 1, key="vfd_speed",
-                          on_change=invalidate_secondary_references, kwargs={"speed_changed": True})
-    st.caption("Enter shaft-speed ratio from the drive; frequency ratio alone may differ because of motor slip.")
-    delta_p = st.number_input("Pump differential pressure (kPa)", min_value=0.0, value=150.0, step=1.0, key="vfd_dp")
-    load_pct = 100 * actual_q / design_q
-    measured_head = delta_p * 1000 / (WATER_DENSITY_KG_M3 * GRAVITY_M_S2)
-    hydraulic_kw = delta_p * actual_q / 1000
-    q_col, speed_col, head_col = st.columns(3)
-    q_col.metric("Operating flow / reference", f"{load_pct:.1f}%")
-    speed_col.metric("Rotational speed / reference", f"{speed_pct}%")
-    head_col.metric("Differential pressure head", f"{measured_head:.2f} m")
-    st.metric("Hydraulic power transferred to water", f"{hydraulic_kw:.2f} kW")
-    st.caption(
-        "Head uses differential pressure only, assuming equal pressure-tap elevations and velocity heads. "
-        "Hydraulic power = Δp × Q; it is not motor input power or an energy-savings estimate."
-    )
-    if actual_q == 0:
-        st.warning("Zero flow entered. Check pump running state, valve positions and flow measurement; no operating-range conclusion is available.")
-    elif actual_q > design_q:
-        st.info("Flow exceeds the entered reference. Check the actual pump curve and permitted operating range.")
-    else:
-        st.info("Part-load flow recorded. Check the manufacturer's permitted operating range and minimum continuous flow at this speed.")
-
-    st.subheader("Secondary-pump NPSH check")
-    st.write("The Lowara demo curve in the other tabs is not used for this secondary pump.")
-    secondary_pressure = st.number_input(
-        "Secondary absolute suction pressure at NPSH datum (kPa)",
-        min_value=0.1, value=30.0, step=0.1, key="vfd_suction",
-    )
-    secondary_diameter = st.number_input(
-        "Secondary suction measurement internal diameter (mm)",
-        min_value=25.0, max_value=600.0, value=150.0, step=1.0, key="vfd_diameter",
-        help="Internal diameter where the suction pressure is measured, normally the pump suction flange.",
-    )
-    secondary_available = available_npsh(secondary_pressure, actual_q * 3.6, secondary_diameter)
-    secondary_problem = npsha_input_problem(secondary_pressure, actual_q * 3.6, secondary_diameter)
-    st.metric("Secondary NPSHa · calculated", "Not assessed" if secondary_problem else f"{secondary_available:.2f} m")
-    st.caption("Assumes absolute static pressure at the pump NPSH datum and water at 20 °C.")
-    if secondary_problem:
-        st.error("NPSH status: NOT ASSESSED — " + secondary_problem)
-    elif actual_q == 0:
-        st.warning(
-            "NPSH operating status: NOT ASSESSED — zero flow. The NPSHa value above is a "
-            "pressure-based calculation only. Confirm whether the pump is stopped, isolated, "
-            "or running without flow before assessing a duty point."
-        )
-    elif st.session_state.get("vfd_npshr_recheck", False):
-        st.info(
-            "Flow or speed changed. Review the NPSHr value for the new operating point, "
-            "then confirm it again. No previous NPSH status is carried forward."
-        )
-    has_npshr = st.checkbox(
-        "I have secondary-pump NPSHr at this flow and speed", key="vfd_has_npshr",
-        disabled=actual_q == 0,
-    ) and actual_q > 0
-    secondary_assessable = has_npshr and not secondary_problem
-    # Keep the entered value visible across rechecks; it is ignored until reconfirmed.
-    secondary_required = st.number_input(
-        "Secondary NPSHr from the selected pump curve (m)",
-        min_value=0.0, value=2.0, step=0.1, key="vfd_npshr",
-        help="Use manufacturer data for this exact pump, impeller, flow and speed. After flow or speed changes, review the value and reconfirm it above.",
-        disabled=actual_q == 0,
-    )
-    if has_npshr:
-        st.session_state.vfd_npshr_recheck = False
-        st.caption(
-            f"User-confirmed NPSHr for {actual_q:.2f} L/s at {speed_pct}% reference speed. "
-            "Recheck the curve if the pump or impeller changes."
-        )
-        if secondary_assessable:
-            show_npsh_assessment(secondary_available, secondary_required, engineer_margin, demo_curve=False)
-    elif actual_q > 0 and not secondary_problem:
-        st.info("NPSH status: NOT ASSESSED — review and confirm pump-specific NPSHr at the current flow and speed. Speed or active floors alone cannot establish cavitation safety.")
-
-    with st.expander("Affinity-law illustration · not an operating-point prediction"):
-        st.write(
-            "For corresponding points of the same pump and impeller: Q₂/Q₁ = r, "
-            "H₂/H₁ = r², and shaft P₂/P₁ ≈ r³ (constant efficiency). "
-            "Actual flow depends on the pump/system curve intersection and control settings."
-        )
-        st.table([
-            {
-                "Speed / reference": f"{percent}%",
-                "Corresponding flow / reference": f"{percent}%",
-                "Corresponding head / reference": f"{(percent / 100)**2 * 100:.2f}%",
-                "Ideal shaft power / reference": f"{(percent / 100)**3 * 100:.2f}%",
-            }
-            for percent in sorted({25, 50, 75, 100, speed_pct})
-        ])
-        st.caption(
-            "These ratios do not predict flow from active floors, guarantee control pressure, "
-            "estimate actual electrical savings, or supply NPSHr. No secondary-pump curve has been loaded."
-        )
-        st.markdown("[KSB: pump affinity laws](https://www.ksb.com/en-global/centrifugal-pump-lexicon/article/pump-affinity-laws-1117584)")
-
-
-with intelligence:
-    st.subheader("Pump Detective Intelligence")
-    st.caption("Rule-based evidence and next checks · Educational simulation · No AI service required")
-    st.write(
-        "Choose one operating snapshot. Findings are ordered by urgency of the check, "
-        "not by probability of a fault. Unrelated tabs are never combined into one pump diagnosis."
-    )
-    source = st.selectbox(
-        "Operating snapshot",
-        ("Fouling forecast · predictive trend", "Repair simulation · current condition", "Secondary pump · current inputs"),
-        key="intel_source",
-    )
-    is_forecast = source.startswith("Fouling")
-    snapshot_diameter = LOWARA_SUCTION_NOZZLE_MM
-    if is_forecast:
-        snapshot_q = DESIGN_FLOW_LPS
-        snapshot_suction = forecast_summary["suction_now_kpa_abs"]
-        snapshot_problem = npsha_input_problem(snapshot_suction, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
-        snapshot_a = available_npsh(snapshot_suction, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
-        snapshot_r = forecast_summary["npshr_m"]
-        snapshot_drop = forecast_summary["normalised_dp_now_kpa"]
-        snapshot_clean = CLEAN_FILTER_DROP_KPA
-        snapshot_tolerance = snapshot_min = None
-        st.caption(
-            f"{forecast_summary['scenario']} · {forecast_summary['data_label']} {forecast_summary['history_days']}-day sensor log · "
-            f"{forecast_summary['pressure_before_strainer_kpa_abs']:g} kPa abs before the strainer · design flow "
-            f"{snapshot_q:g} L/s · Lowara demo/reference pump · settings from the Fouling forecast tab."
-        )
-    elif source == "Repair simulation · current condition":
-        snapshot_q = DESIGN_FLOW_LPS
-        snapshot_a = available_npsh(suction_kpa, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
-        snapshot_r = lowara_npshr(snapshot_q * 3.6)
-        snapshot_drop = upstream_kpa - suction_kpa if reveal else None
-        snapshot_clean = CLEAN_FILTER_DROP_KPA
-        snapshot_tolerance = TOLERANCE_KPA
-        snapshot_min = None
-        snapshot_suction = suction_kpa
-        snapshot_problem = npsha_input_problem(suction_kpa, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
-        st.caption(
-            f"{repair_case} · BEFORE any repair · {snapshot_q:g} L/s · suction {suction_kpa:.2f} kPa abs · "
-            "100 mm inlet · Lowara demo/reference pump at approximately 1450 rpm · water at 20 °C. "
-            "Cleaning and resizing results are hypothetical and are not used in this current-condition diagnosis."
-        )
-        st.caption("Strainer reference: demo clean drop 5 kPa with illustrative ±2 kPa tolerance at the fixed design flow; not a field alarm threshold. "
-                   "The post-maintenance check in Fouling forecast uses a band computed from instrument accuracy instead.")
-        if not reveal:
-            st.info("Reveal pressure before the strainer in Repair simulation to enable strainer comparison. NPSH can still be calculated from the known demo suction pressure.")
-    else:
-        snapshot_q = actual_q
-        snapshot_a = secondary_available
-        snapshot_r = secondary_required if has_npshr else None
-        snapshot_drop = snapshot_clean = snapshot_tolerance = snapshot_min = None
-        snapshot_suction = secondary_pressure
-        snapshot_problem = secondary_problem
-        snapshot_diameter = secondary_diameter
-        st.caption(
-            f"Secondary pump · {actual_q:.2f} L/s · speed {speed_pct}% · suction {secondary_pressure:.2f} kPa abs · "
-            f"{secondary_diameter:g} mm inlet · water at 20 °C. Lowara curve is not used. "
-            "Use individual-pump flow for NPSH and minimum-flow checks; set flow is valid only if it is also the flow through the evaluated pump."
-        )
-        if st.checkbox("Paired secondary-strainer pressures available for this snapshot", key="intel_filter_known"):
-            st.caption("Assumes the strainer outlet is at the suction pressure entered in the secondary tab, with negligible intervening loss. Use simultaneous absolute readings.")
-            filter_upstream = st.number_input(
-                "Secondary strainer upstream absolute pressure (kPa)", min_value=0.1,
-                value=35.0, step=0.1, key="intel_filter_upstream",
-            )
-            snapshot_drop = filter_upstream - secondary_pressure
-            if st.checkbox("Clean-strainer reference applies at this same flow and fluid condition", key="intel_clean_known"):
-                snapshot_clean = st.number_input(
-                    "Clean-strainer reference Δp (kPa)", min_value=0.0, value=5.0,
-                    step=0.1, key="intel_clean_drop",
-                )
-                snapshot_tolerance = st.number_input(
-                    "Engineer-selected strainer comparison tolerance (kPa)", min_value=0.0,
-                    value=2.0, step=0.1, key="intel_filter_tolerance",
-                )
-                st.caption("These are editable demo starting values. Replace them with a reference and tolerance for this operating condition.")
-        if st.checkbox("Manufacturer minimum flow available at this speed", key="intel_min_known"):
-            snapshot_min = st.number_input(
-                "Manufacturer minimum continuous flow at this speed (L/s)", min_value=0.0,
-                value=10.0, step=0.1, key="intel_min_flow",
-            )
-            st.caption("Replace the demo starting value with the manufacturer's limit for this pump and speed.")
-
-    if is_forecast:
-        findings = forecast_findings(forecast_summary)
-    else:
-        findings = diagnostic_findings(
-            snapshot_a, snapshot_r, engineer_margin, snapshot_q,
-            snapshot_drop, snapshot_clean, snapshot_tolerance, snapshot_min,
-            suction_abs_kpa=snapshot_suction, npsha_problem=snapshot_problem,
-        )
-    if snapshot_problem:
-        # An unusable suction reading must not produce an NPSH margin anywhere downstream.
-        snapshot_r = None
-    a_col, r_col, drop_col = st.columns(3)
-    a_col.metric("Snapshot NPSHa", "Not assessed" if snapshot_problem else f"{snapshot_a:.2f} m")
-    r_col.metric("Snapshot NPSHr", "Missing" if snapshot_r is None else f"{snapshot_r:.2f} m")
-    drop_col.metric("Strainer Δp* now (normalised)" if is_forecast else "Snapshot strainer Δp",
-                    "Missing" if snapshot_drop is None else f"{snapshot_drop:.2f} kPa")
-    if is_forecast:
-        reco = forecast_summary["recommendation"]
-        reco_text = (f"**Predictive maintenance · {reco['priority']}** — {reco['action']}"
-                     + (f", by **{reco['complete_by']}**." if reco["complete_by"] else "."))
-        (st.error if reco["priority"] == "URGENT" else st.warning if reco["priority"] in ("HIGH", "PLANNED") else st.success)(reco_text)
-    st.write(f"**First check: {findings[0]['Finding']}**")
-    st.write(findings[0]["Next check"])
-    for item in findings:
-        with st.expander(item["Finding"], expanded=item["Priority"] <= 1):
-            st.write(f"**Evidence:** {item['Evidence']}")
-            st.write(f"**Next check:** {item['Next check']}")
-    st.caption(
-        "No overall SAFE verdict is issued. NPSH margin, strainer comparison and minimum flow are separate checks; "
-        "missing data remain unassessed. Noise, vibration, temperature changes and other failure modes are outside this model. "
-        "The separate 0.50 m Xylem/catalog allowance is not added to the engineer-required NPSH margin."
-    )
-    report_lines = [
-        "Pump Detective — diagnostic snapshot", source,
-        (f"Forecast scenario: {forecast_summary['scenario']}; {forecast_summary['data_origin']}; Lowara demo/reference pump; "
-         f"recommendation: {forecast_summary['recommendation']['action']} "
-         f"({forecast_summary['recommendation']['priority']}, by {forecast_summary['recommendation']['complete_by']})"
-         if is_forecast else
-         f"Repair case: {repair_case}; current condition before repairs; Lowara demo/reference pump"
-         if source.startswith("Repair") else
-         f"Secondary inputs; speed {speed_pct}%; user-supplied NPSHr only; Lowara curve not used"),
-        f"Flow: {snapshot_q:.2f} L/s; NPSHa: {snapshot_a:.4f} m; NPSHr: {snapshot_r}",
-        f"Engineer-required NPSH margin: {engineer_margin:.2f} m",
-        f"Strainer drop: {snapshot_drop}; clean reference: {snapshot_clean}; tolerance: {snapshot_tolerance} kPa",
-        f"Manufacturer minimum flow: {snapshot_min} L/s (None = missing)",
-        "Assumptions: water at 20 C; absolute suction pressure at NPSH datum; no overall pump-health verdict.",
-    ]
-    for item in findings:
-        report_lines.extend(["", item["Finding"], "Evidence: " + item["Evidence"], "Next check: " + item["Next check"]])
-    st.download_button(
-        "Download diagnostic report", data="\n".join(report_lines),
-        file_name="pump_detective_diagnosis.txt", mime="text/plain", key="intel_download",
-    )
-
-
-    st.subheader("Ask Pump Detective")
-    st.caption("Explanations use the selected snapshot above. Calculated findings remain authoritative.")
-    explanation_snapshot = {
-        "source": source,
-        "case": (forecast_summary["scenario"] if is_forecast else
-                 repair_case if source.startswith("Repair") else "Secondary current inputs"),
-        "flow_lps": snapshot_q,
-        "suction_absolute_kpa": snapshot_suction,
-        "suction_diameter_mm": snapshot_diameter,
-        "speed_percent": speed_pct if source.startswith("Secondary") else None,
-        "pump_curve": ("User-supplied NPSHr at current flow and speed; None means missing"
-                       if source.startswith("Secondary") else "Lowara demo/reference approximately 1450 rpm"),
-        "npsha_m": snapshot_a,
-        "npshr_m": snapshot_r,
-        "engineer_required_margin_m": engineer_margin,
-        "actual_margin_m": None if snapshot_r is None or snapshot_q == 0 else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[0],
-        "surplus_deficit_m": None if snapshot_r is None or snapshot_q == 0 else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[1],
-        "npsh_status": "NOT ASSESSED · unusable suction reading" if snapshot_problem else "NOT ASSESSED · zero flow" if snapshot_q == 0 else "NOT ASSESSED" if snapshot_r is None else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[2],
-        "filter_drop_kpa": snapshot_drop,
-        "clean_filter_reference_kpa": snapshot_clean,
-        "filter_tolerance_kpa": snapshot_tolerance,
-        "manufacturer_minimum_flow_lps": snapshot_min,
-        "assumptions": "Water at 20 C; static absolute pressure at NPSH datum. No overall safety verdict. Individual pump flow must match evaluated pump.",
-        "catalog_allowance_note": "Separate 0.50 m Xylem/catalog comparison for Lowara demo only; not added to engineer margin.",
-        "findings": findings,
-    }
-    if is_forecast:
-        explanation_snapshot["forecast"] = forecast_summary
-    if source.startswith("Repair") and reveal:
-        clean_head = available_npsh(upstream_kpa - CLEAN_FILTER_DROP_KPA, snapshot_q * 3.6, 100)
-        clean_actual, clean_surplus, clean_status = npsh_assessment(clean_head, snapshot_r, engineer_margin)
-        explanation_snapshot["cleaning_simulation"] = {
-            "npsha_m": clean_head, "actual_margin_m": clean_actual,
-            "surplus_m": clean_surplus, "status": clean_status,
-            "assumptions": "Hypothetical clean-strainer loss 5 kPa; fixed flow and upstream pressure, unchanged 100 mm inlet; before any pipe resize.",
-        }
-    mode = st.radio(
-        "Explanation service", ("OpenAI · AI explanation", "Offline · rule-based explanation"),
-        # Without a configured key, start on Offline so the button works on first click.
-        index=0 if os.environ.get("OPENAI_API_KEY", "").strip() else 1,
-        key="explain_mode",
-    )
-    topic = st.selectbox(
-        "Question", ((MAINTENANCE_TOPIC,) if is_forecast else ()) + (
-            "Explain the current diagnosis", "Why is there NPSH risk?",
-            "Would cleaning the strainer help?", "Which data are missing?"),
-        key="explain_topic",
-    )
-    use_ai = mode.startswith("OpenAI")
-    api_key = ""
-    model = ""
-    custom_question = ""
-    if use_ai:
-        with st.expander("AI connection settings"):
-            st.caption("Use OPENAI_API_KEY from your environment, or enter a key for this session. The app does not save it to a file or include it in the diagnostic report.")
-            session_key = st.text_input("OpenAI API key (session only)", type="password", key="explain_api_key")
-            api_key = session_key.strip() or os.environ.get("OPENAI_API_KEY", "").strip()
-            model = st.text_input("OpenAI model", value=os.environ.get("OPENAI_MODEL", "gpt-6-luna"), key="explain_model").strip()
-            st.caption("Model access depends on your API account. Change the model if needed. No additional Python package is required.")
-        custom_question = st.text_area(
-            "Or ask your own question (Arabic or English)", max_chars=1200, key="explain_custom_question",
-        ).strip()
-        if not api_key:
-            st.info("AI is not connected. Add an OpenAI API key in AI connection settings, or choose Offline for a local explanation.")
-        st.caption("Generate sends this snapshot and your question to OpenAI and may incur API charges. Nothing is sent just by changing inputs.")
-    question = custom_question or topic
-    snapshot_text = json.dumps(explanation_snapshot, sort_keys=True, ensure_ascii=False, allow_nan=False)
-    fingerprint = hashlib.sha256((snapshot_text + mode + model + question).encode("utf-8")).hexdigest()
-    saved = st.session_state.get("explain_result")
-    if saved and saved["fingerprint"] != fingerprint:
-        del st.session_state["explain_result"]
-        saved = None
-    if st.button("Generate explanation", key="explain_generate", disabled=use_ai and (not api_key or not model)):
-        # Remove the previous answer first, including when a new request fails.
-        st.session_state.pop("explain_result", None)
-        try:
-            if use_ai:
-                with st.spinner("Explaining the selected snapshot…"):
-                    answer = request_ai_explanation(explanation_snapshot, question, api_key, model)
-            elif topic == MAINTENANCE_TOPIC:
-                answer = offline_work_order(explanation_snapshot)
-            else:
-                answer = offline_explanation(explanation_snapshot, topic)
-            st.session_state["explain_result"] = {
-                "fingerprint": fingerprint, "answer": answer,
-                "mode": mode, "question": question,
-            }
-        except (RuntimeError, ValueError) as exc:
-            st.error(str(exc))
-            st.info("Your calculated diagnosis is unchanged. You can use Offline while the AI connection is unavailable.")
-    saved = st.session_state.get("explain_result")
-    if saved and saved["fingerprint"] == fingerprint:
-        st.caption(f"{saved['mode']} · {saved['question']}")
-        if saved["mode"].startswith("OpenAI"):
-            # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
-            st.markdown(saved["answer"].replace("$", "\\$"))
-        else:
-            st.text(saved["answer"])
-        st.caption("Review AI wording against the calculated findings above. An explanation does not confirm a physical fault or certify pump safety.")
+    with tab_how:
+        fc_export = fc_log.assign(normalised_dp_kpa=fc_norm).round(3)
+        fc_export.insert(0, "timestamp", pd.to_datetime(fc_hourly["time"]).dt.strftime("%Y-%m-%d %H:%M"))
         st.download_button(
-            "Download explanation", data=saved["mode"] + "\nQuestion: " + saved["question"] + "\n\n" + saved["answer"] + "\n\nSnapshot:\n" + snapshot_text,
-            file_name="pump_detective_explanation.txt", mime="text/plain", key="explain_download",
+            "⬇ Sensor data (CSV, for Excel or re-upload)",
+            data=fc_export.to_csv(index=False),
+            file_name=("pump_detective_hourly_log.csv" if fc_upload else
+                       f"pump_detective_synthetic_log_{fc_scenario.lower().replace(' ', '_')}.csv"),
+            mime="text/csv", key="fc_download",
+            help="The raw hourly data behind the chart. Data stays CSV so it opens in Excel and can be uploaded "
+                 "again; the readable report is the PDF on the recommendation box.",
         )
+
+
+    fc_findings = forecast_findings(forecast_summary)
+    with page_top:
+        ui.header(forecast_summary["data_label"], fc_scenario)
+        ui.status_cards(forecast_status_cards(forecast_summary))
+        ui.note("<b>How to use:</b> ① choose the data in the sidebar ② read the recommendation below "
+                "③ create the work order, or record the result after a cleaning. Details are in the tabs under the chart.",
+                "guide")
+
+    with p_buttons:
+        fc_snapshot = forecast_snapshot(forecast_summary, engineer_margin)
+        b1, b2, b3 = st.columns(3)
+        fc_snapshot_text = answer_button(fc_snapshot, MAINTENANCE_TOPIC, MAINTENANCE_TOPIC, ai, "work_order",
+                                         "📋 Create work order", slot=b1, primary=True)
+        if b2.button("🧹 Record cleaning result", key="verify_open", width="stretch",
+                     help="After maintenance: enter one Δp reading and the flow to check whether the cleaning worked."):
+            verify_dialog({"scenario": fc_scenario, "upstream": fc_upstream, "maint_limit": fc_maint_limit,
+                           "dp_star_now": fc_fit.current_kpa})
+        fc_wo = st.session_state.get("work_order")
+        fc_report_payload = json.dumps({
+            "summary": forecast_summary, "findings": fc_findings,
+            "cards": [card[:4] for card in forecast_status_cards(forecast_summary)],
+            "daily": [(d, round(float(v), 3)) for d, v in enumerate(fc_daily) if np.isfinite(v)],
+            "forecast": [(fc_last_day + d, round(float(fc_fit.current_kpa * np.exp(fc_fit.rate_per_day * d)), 3))
+                         for d in range(0, 61)],
+            "limits": [("Cleaning limit", float(fc_maint_limit)), ("NPSH WARNING", float(fc_warn_dp)),
+                       ("NPSH CRITICAL", float(fc_crit_dp))],
+            "work_order": fc_wo["answer"] if fc_wo else None,
+        }, sort_keys=True, default=str)
+        b3.download_button("⬇ Download report (PDF)", data=forecast_report_pdf(fc_report_payload),
+                           file_name="pump_detective_report.pdf", mime="application/pdf", key="report_download",
+                           width="stretch",
+                           help="Status, recommendation, chart, forecast table, evidence and, once created, the work order.")
+    with p_answer:
+        show_answer("work_order", fc_snapshot_text, "pump_detective_work_order.pdf")
+    with p_more:
+        with st.expander("🔎 Why? The evidence behind this recommendation"):
+            for item in fc_findings:
+                st.markdown(f"**{item['Finding']}**  \n{item['Evidence']}  \n*Next check:* {item['Next check']}")
+            st.caption("Findings are ordered by urgency of the check, not by probability of a fault. No overall "
+                       "SAFE verdict is issued; the 0.50 m catalogue allowance is not added to the margin.")
+        with st.expander("💬 Ask about this forecast"):
+            ask_topic = st.selectbox(
+                "Question", ("Explain the current diagnosis", "Why is there NPSH risk?",
+                             "Would cleaning the strainer help?", "Which data are missing?"), key="ask_topic")
+            ask_custom = ""
+            if ai["use_ai"]:
+                ask_custom = st.text_area("Or ask your own question (Arabic or English)", max_chars=1200,
+                                          key="ask_custom").strip()
+            ask_text = answer_button(fc_snapshot, ask_custom or ask_topic, ask_topic, ai, "ask_answer", "Ask")
+            show_answer("ask_answer", ask_text, "pump_detective_answer.pdf")
+
+
+if on_tools_page:
+    with part_load:
+        ui.section(None, "Secondary pump · Part-load / VFD", "Is the secondary pump safe at part load?",
+                   "Enter one operating point from the drive and the meters. Speed alone cannot prove cavitation "
+                   "safety: NPSH is assessed only with the pump's own NPSHr.", first=True)
+        p_in, p_out = st.columns([1, 2], gap="large")
+        with p_in:
+            with st.container(border=True):
+                st.markdown("**Operating point**")
+                active_floors = st.slider("Active floors / cooling demand (%)", 0, 100, 50, 5, key="vfd_floors",
+                                          help="Context only: 50 % of floors does not mean 50 % flow or speed.")
+                design_q = st.number_input(
+                    "Reference flow (L/s)", min_value=0.1, value=42.4, step=0.1, key="vfd_design_q",
+                    help="42.4 L/s is the project-preview set reference. Confirm whether it is per pump or per set, "
+                         "and use the same basis for the operating flow.",
+                )
+                actual_q = st.number_input("Operating flow (L/s)", min_value=0.0, value=21.2, step=0.1, key="vfd_actual_q",
+                                           on_change=invalidate_secondary_references, kwargs={"flow_changed": True})
+                speed_pct = st.slider("Speed (% of reference)", 10, 100, 75, 1, key="vfd_speed",
+                                      on_change=invalidate_secondary_references, kwargs={"speed_changed": True},
+                                      help="Shaft-speed ratio from the drive; frequency ratio alone may differ (slip).")
+                delta_p = st.number_input("Pump differential pressure (kPa)", min_value=0.0, value=150.0, step=1.0,
+                                          key="vfd_dp")
+        load_pct = 100 * actual_q / design_q
+        measured_head = delta_p * 1000 / (WATER_DENSITY_KG_M3 * GRAVITY_M_S2)
+        hydraulic_kw = delta_p * actual_q / 1000
+        with p_out:
+            ui.status_cards([
+                ("Flow vs reference", f"{load_pct:.0f} %", f"{actual_q:.1f} of {design_q:.1f} L/s",
+                 "WARNING" if actual_q == 0 or actual_q > design_q else "PLANNED"),
+                ("Speed", f"{speed_pct} %", f"cooling demand context {active_floors} %", "PLANNED"),
+                ("Pump head", f"{measured_head:.1f} m", f"from {delta_p:g} kPa differential", "PLANNED"),
+                ("Hydraulic power", f"{hydraulic_kw:.2f} kW", "Δp × Q, power given to the water", "PLANNED"),
+            ])
+            if actual_q == 0:
+                st.warning("Zero flow entered. Check the pump running state, valves and flow meter; no operating-range "
+                           "conclusion is possible.")
+            elif actual_q > design_q:
+                st.info("Flow exceeds the reference. Check the pump curve and its permitted operating range.")
+            else:
+                st.info("Part-load flow recorded. Check the manufacturer's permitted range and minimum continuous flow "
+                        "at this speed.")
+            st.markdown("**Affinity laws: what slowing the pump does**")
+            st.altair_chart(visuals.affinity_chart(speed_pct), width="stretch")
+            st.caption("For corresponding points of the same pump and impeller. Actual flow depends on where the pump "
+                       "and system curves meet; this is an illustration, not an operating-point prediction or an "
+                       "energy-savings estimate. [KSB: pump affinity laws]"
+                       "(https://www.ksb.com/en-global/centrifugal-pump-lexicon/article/pump-affinity-laws-1117584)")
+
+        ui.section(None, "Secondary-pump NPSH", "Is there enough suction head for this pump?",
+                   "The Lowara demo curve is not used here: enter this pump's NPSHr at this flow and speed.")
+        n_in, n_out = st.columns([1, 2], gap="large")
+        with n_in:
+            with st.container(border=True):
+                st.markdown("**Suction**")
+                secondary_pressure = st.number_input(
+                    "Absolute suction pressure at the NPSH datum (kPa)", min_value=0.1, value=30.0, step=0.1,
+                    key="vfd_suction",
+                )
+                secondary_diameter = st.number_input(
+                    "Suction internal diameter (mm)", min_value=25.0, max_value=600.0, value=150.0, step=1.0,
+                    key="vfd_diameter",
+                    help="Internal diameter where the suction pressure is measured, normally the pump suction flange.",
+                )
+                has_npshr = st.checkbox(
+                    "I have this pump's NPSHr at this flow and speed", key="vfd_has_npshr", disabled=actual_q == 0,
+                ) and actual_q > 0
+                # Keep the entered value visible across rechecks; it is ignored until reconfirmed.
+                secondary_required = st.number_input(
+                    "NPSHr from the pump curve (m)", min_value=0.0, value=2.0, step=0.1, key="vfd_npshr",
+                    help="Manufacturer data for this exact pump, impeller, flow and speed. After a flow or speed "
+                         "change, review it and tick the box again.",
+                    disabled=actual_q == 0,
+                )
+        secondary_available = available_npsh(secondary_pressure, actual_q * 3.6, secondary_diameter)
+        secondary_problem = npsha_input_problem(secondary_pressure, actual_q * 3.6, secondary_diameter)
+        secondary_assessable = has_npshr and not secondary_problem
+        recheck_pending = st.session_state.get("vfd_npshr_recheck", False)
+        if has_npshr:
+            st.session_state.vfd_npshr_recheck = False
+        with n_out:
+            if secondary_problem:
+                ui.status_cards([("NPSH status", "NOT ASSESSED", "the suction inputs are not usable", "NOT ASSESSED")])
+                st.error(secondary_problem)
+            elif actual_q == 0:
+                ui.status_cards([("NPSH status", "NOT ASSESSED", "zero flow", "NOT ASSESSED"),
+                                 ("NPSH available", f"{secondary_available:.2f} m", "pressure-based only", "PLANNED")])
+                st.warning("Confirm whether the pump is stopped, isolated or running without flow before assessing a "
+                           "duty point.")
+            elif secondary_assessable:
+                show_npsh_assessment(secondary_available, secondary_required, engineer_margin, demo_curve=False)
+                st.caption(f"User-confirmed NPSHr for {actual_q:.2f} L/s at {speed_pct} % speed. Recheck it if the "
+                           "pump or impeller changes.")
+            else:
+                ui.status_cards([("NPSH status", "NOT ASSESSED", "pump-specific NPSHr not confirmed", "NOT ASSESSED"),
+                                 ("NPSH available", f"{secondary_available:.2f} m", "what the system supplies", "PLANNED")])
+                if recheck_pending:
+                    st.info("Flow or speed changed. Review the NPSHr for the new operating point and confirm it again; "
+                            "no previous status is carried forward.")
+                else:
+                    st.info("Tick the box and enter this pump's NPSHr at the current flow and speed to get a status. "
+                            "Speed or active floors alone cannot establish cavitation safety.")
+        with st.expander("Assumptions"):
+            st.caption("Head uses differential pressure only, assuming equal tap elevations and velocity heads. "
+                       "Hydraulic power is not motor input power. NPSHa assumes absolute static pressure at the pump's "
+                       "NPSH datum and water at 20 °C. Inputs are demo values.")
+
+
+if on_tools_page:
+    with tool_findings:
+        ui.section(None, "Explain", "Findings for a tool case",
+                   "Rule-based evidence and next checks for the Repair simulation or the Secondary pump inputs. "
+                   "The strainer forecast has its own work order on the forecast page.", first=True)
+        st.caption("Rule-based evidence and next checks · Educational simulation · No AI service required")
+        st.write(
+            "Choose one operating snapshot. Findings are ordered by urgency of the check, "
+            "not by probability of a fault. Unrelated tabs are never combined into one pump diagnosis."
+        )
+        source = st.selectbox(
+            "Operating snapshot",
+            ("Repair simulation · current condition", "Secondary pump · current inputs"),
+            key="intel_source",
+        )
+        is_forecast = source.startswith("Fouling")
+        snapshot_diameter = LOWARA_SUCTION_NOZZLE_MM
+        if is_forecast:
+            snapshot_q = DESIGN_FLOW_LPS
+            snapshot_suction = forecast_summary["suction_now_kpa_abs"]
+            snapshot_problem = npsha_input_problem(snapshot_suction, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+            snapshot_a = available_npsh(snapshot_suction, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+            snapshot_r = forecast_summary["npshr_m"]
+            snapshot_drop = forecast_summary["normalised_dp_now_kpa"]
+            snapshot_clean = CLEAN_FILTER_DROP_KPA
+            snapshot_tolerance = snapshot_min = None
+            st.caption(
+                f"{forecast_summary['scenario']} · {forecast_summary['data_label']} {forecast_summary['history_days']}-day sensor log · "
+                f"{forecast_summary['pressure_before_strainer_kpa_abs']:g} kPa abs before the strainer · design flow "
+                f"{snapshot_q:g} L/s · Lowara demo/reference pump · settings from the Strainer forecast page."
+            )
+        elif source == "Repair simulation · current condition":
+            snapshot_q = DESIGN_FLOW_LPS
+            snapshot_a = available_npsh(suction_kpa, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+            snapshot_r = lowara_npshr(snapshot_q * 3.6)
+            snapshot_drop = upstream_kpa - suction_kpa if reveal else None
+            snapshot_clean = CLEAN_FILTER_DROP_KPA
+            snapshot_tolerance = TOLERANCE_KPA
+            snapshot_min = None
+            snapshot_suction = suction_kpa
+            snapshot_problem = npsha_input_problem(suction_kpa, snapshot_q * 3.6, LOWARA_SUCTION_NOZZLE_MM)
+            st.caption(
+                f"{repair_case} · BEFORE any repair · {snapshot_q:g} L/s · suction {suction_kpa:.2f} kPa abs · "
+                "100 mm inlet · Lowara demo/reference pump at approximately 1450 rpm · water at 20 °C. "
+                "Cleaning and resizing results are hypothetical and are not used in this current-condition diagnosis."
+            )
+            st.caption("Strainer reference: demo clean drop 5 kPa with illustrative ±2 kPa tolerance at the fixed design flow; not a field alarm threshold. "
+                       "The post-maintenance check on the Strainer forecast page uses a band computed from instrument accuracy instead.")
+            if not reveal:
+                st.info("Reveal pressure before the strainer in Repair simulation to enable strainer comparison. NPSH can still be calculated from the known demo suction pressure.")
+        else:
+            snapshot_q = actual_q
+            snapshot_a = secondary_available
+            snapshot_r = secondary_required if has_npshr else None
+            snapshot_drop = snapshot_clean = snapshot_tolerance = snapshot_min = None
+            snapshot_suction = secondary_pressure
+            snapshot_problem = secondary_problem
+            snapshot_diameter = secondary_diameter
+            st.caption(
+                f"Secondary pump · {actual_q:.2f} L/s · speed {speed_pct}% · suction {secondary_pressure:.2f} kPa abs · "
+                f"{secondary_diameter:g} mm inlet · water at 20 °C. Lowara curve is not used. "
+                "Use individual-pump flow for NPSH and minimum-flow checks; set flow is valid only if it is also the flow through the evaluated pump."
+            )
+            if st.checkbox("Paired secondary-strainer pressures available for this snapshot", key="intel_filter_known"):
+                st.caption("Assumes the strainer outlet is at the suction pressure entered in the secondary tab, with negligible intervening loss. Use simultaneous absolute readings.")
+                filter_upstream = st.number_input(
+                    "Secondary strainer upstream absolute pressure (kPa)", min_value=0.1,
+                    value=35.0, step=0.1, key="intel_filter_upstream",
+                )
+                snapshot_drop = filter_upstream - secondary_pressure
+                if st.checkbox("Clean-strainer reference applies at this same flow and fluid condition", key="intel_clean_known"):
+                    snapshot_clean = st.number_input(
+                        "Clean-strainer reference Δp (kPa)", min_value=0.0, value=5.0,
+                        step=0.1, key="intel_clean_drop",
+                    )
+                    snapshot_tolerance = st.number_input(
+                        "Engineer-selected strainer comparison tolerance (kPa)", min_value=0.0,
+                        value=2.0, step=0.1, key="intel_filter_tolerance",
+                    )
+                    st.caption("These are editable demo starting values. Replace them with a reference and tolerance for this operating condition.")
+            if st.checkbox("Manufacturer minimum flow available at this speed", key="intel_min_known"):
+                snapshot_min = st.number_input(
+                    "Manufacturer minimum continuous flow at this speed (L/s)", min_value=0.0,
+                    value=10.0, step=0.1, key="intel_min_flow",
+                )
+                st.caption("Replace the demo starting value with the manufacturer's limit for this pump and speed.")
+
+        if is_forecast:
+            findings = forecast_findings(forecast_summary)
+        else:
+            findings = diagnostic_findings(
+                snapshot_a, snapshot_r, engineer_margin, snapshot_q,
+                snapshot_drop, snapshot_clean, snapshot_tolerance, snapshot_min,
+                suction_abs_kpa=snapshot_suction, npsha_problem=snapshot_problem,
+            )
+        if snapshot_problem:
+            # An unusable suction reading must not produce an NPSH margin anywhere downstream.
+            snapshot_r = None
+        a_col, r_col, drop_col = st.columns(3)
+        a_col.metric("Snapshot NPSHa", "Not assessed" if snapshot_problem else f"{snapshot_a:.2f} m")
+        r_col.metric("Snapshot NPSHr", "Missing" if snapshot_r is None else f"{snapshot_r:.2f} m")
+        drop_col.metric("Strainer Δp* now (normalised)" if is_forecast else "Snapshot strainer Δp",
+                        "Missing" if snapshot_drop is None else f"{snapshot_drop:.2f} kPa")
+        if is_forecast:
+            reco = forecast_summary["recommendation"]
+            reco_text = (f"**Predictive maintenance · {reco['priority']}** — {reco['action']}"
+                         + (f", by **{reco['complete_by']}**." if reco["complete_by"] else "."))
+            (st.error if reco["priority"] == "URGENT" else st.warning if reco["priority"] in ("HIGH", "PLANNED") else st.success)(reco_text)
+        st.write(f"**First check: {findings[0]['Finding']}**")
+        st.write(findings[0]["Next check"])
+        for item in findings:
+            with st.expander(item["Finding"], expanded=item["Priority"] <= 1):
+                st.write(f"**Evidence:** {item['Evidence']}")
+                st.write(f"**Next check:** {item['Next check']}")
+        st.caption(
+            "No overall SAFE verdict is issued. NPSH margin, strainer comparison and minimum flow are separate checks; "
+            "missing data remain unassessed. Noise, vibration, temperature changes and other failure modes are outside this model. "
+            "The separate 0.50 m Xylem/catalog allowance is not added to the engineer-required NPSH margin."
+        )
+        report_lines = [
+            "Pump Detective — diagnostic snapshot", source,
+            (f"Forecast scenario: {forecast_summary['scenario']}; {forecast_summary['data_origin']}; Lowara demo/reference pump; "
+             f"recommendation: {forecast_summary['recommendation']['action']} "
+             f"({forecast_summary['recommendation']['priority']}, by {forecast_summary['recommendation']['complete_by']})"
+             if is_forecast else
+             f"Repair case: {repair_case}; current condition before repairs; Lowara demo/reference pump"
+             if source.startswith("Repair") else
+             f"Secondary inputs; speed {speed_pct}%; user-supplied NPSHr only; Lowara curve not used"),
+            f"Flow: {snapshot_q:.2f} L/s; NPSHa: {snapshot_a:.4f} m; NPSHr: {snapshot_r}",
+            f"Engineer-required NPSH margin: {engineer_margin:.2f} m",
+            f"Strainer drop: {snapshot_drop}; clean reference: {snapshot_clean}; tolerance: {snapshot_tolerance} kPa",
+            f"Manufacturer minimum flow: {snapshot_min} L/s (None = missing)",
+            "Assumptions: water at 20 C; absolute suction pressure at NPSH datum; no overall pump-health verdict.",
+        ]
+        for item in findings:
+            report_lines.extend(["", item["Finding"], "Evidence: " + item["Evidence"], "Next check: " + item["Next check"]])
+        st.download_button(
+            "⬇ Download diagnostic report (PDF)",
+            data=reports.text_pdf("Diagnostic report", source, "\n".join(report_lines[2:]),
+                                  note="Educational simulation. No overall pump-health verdict is issued."),
+            file_name="pump_detective_diagnosis.pdf", mime="application/pdf", key="intel_download",
+        )
+
+
+        st.subheader("Ask Pump Detective")
+        st.caption("Explanations use the selected snapshot above. Calculated findings remain authoritative.")
+        explanation_snapshot = {
+            "source": source,
+            "case": (forecast_summary["scenario"] if is_forecast else
+                     repair_case if source.startswith("Repair") else "Secondary current inputs"),
+            "flow_lps": snapshot_q,
+            "suction_absolute_kpa": snapshot_suction,
+            "suction_diameter_mm": snapshot_diameter,
+            "speed_percent": speed_pct if source.startswith("Secondary") else None,
+            "pump_curve": ("User-supplied NPSHr at current flow and speed; None means missing"
+                           if source.startswith("Secondary") else "Lowara demo/reference approximately 1450 rpm"),
+            "npsha_m": snapshot_a,
+            "npshr_m": snapshot_r,
+            "engineer_required_margin_m": engineer_margin,
+            "actual_margin_m": None if snapshot_r is None or snapshot_q == 0 else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[0],
+            "surplus_deficit_m": None if snapshot_r is None or snapshot_q == 0 else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[1],
+            "npsh_status": "NOT ASSESSED · unusable suction reading" if snapshot_problem else "NOT ASSESSED · zero flow" if snapshot_q == 0 else "NOT ASSESSED" if snapshot_r is None else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[2],
+            "filter_drop_kpa": snapshot_drop,
+            "clean_filter_reference_kpa": snapshot_clean,
+            "filter_tolerance_kpa": snapshot_tolerance,
+            "manufacturer_minimum_flow_lps": snapshot_min,
+            "assumptions": "Water at 20 C; static absolute pressure at NPSH datum. No overall safety verdict. Individual pump flow must match evaluated pump.",
+            "catalog_allowance_note": "Separate 0.50 m Xylem/catalog comparison for Lowara demo only; not added to engineer margin.",
+            "findings": findings,
+        }
+        if is_forecast:
+            explanation_snapshot["forecast"] = forecast_summary
+        if source.startswith("Repair") and reveal:
+            clean_head = available_npsh(upstream_kpa - CLEAN_FILTER_DROP_KPA, snapshot_q * 3.6, 100)
+            clean_actual, clean_surplus, clean_status = npsh_assessment(clean_head, snapshot_r, engineer_margin)
+            explanation_snapshot["cleaning_simulation"] = {
+                "npsha_m": clean_head, "actual_margin_m": clean_actual,
+                "surplus_m": clean_surplus, "status": clean_status,
+                "assumptions": "Hypothetical clean-strainer loss 5 kPa; fixed flow and upstream pressure, unchanged 100 mm inlet; before any pipe resize.",
+            }
+        mode = ai["mode"]
+        topic = st.selectbox(
+            "Question", ((MAINTENANCE_TOPIC,) if is_forecast else ()) + (
+                "Explain the current diagnosis", "Why is there NPSH risk?",
+                "Would cleaning the strainer help?", "Which data are missing?"),
+            key="explain_topic",
+        )
+        use_ai, api_key, model = ai["use_ai"], ai["api_key"], ai["model"]
+        custom_question = ""
+        if use_ai:
+            custom_question = st.text_area(
+                "Or ask your own question (Arabic or English)", max_chars=1200, key="explain_custom_question",
+            ).strip()
+            if not api_key:
+                st.info("The AI service is not configured on this server. Switch to Offline in ⚙️ Settings.")
+        question = custom_question or topic
+        snapshot_text = json.dumps(explanation_snapshot, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        fingerprint = hashlib.sha256((snapshot_text + mode + model + question).encode("utf-8")).hexdigest()
+        saved = st.session_state.get("explain_result")
+        if saved and saved["fingerprint"] != fingerprint:
+            del st.session_state["explain_result"]
+            saved = None
+        if st.button("Generate explanation", key="explain_generate", disabled=use_ai and (not api_key or not model)):
+            # Remove the previous answer first, including when a new request fails.
+            st.session_state.pop("explain_result", None)
+            try:
+                if use_ai:
+                    with st.spinner("Explaining the selected snapshot…"):
+                        answer = request_ai_explanation(explanation_snapshot, question, api_key, model)
+                elif topic == MAINTENANCE_TOPIC:
+                    answer = offline_work_order(explanation_snapshot)
+                else:
+                    answer = offline_explanation(explanation_snapshot, topic)
+                st.session_state["explain_result"] = {
+                    "fingerprint": fingerprint, "answer": answer,
+                    "mode": mode, "question": question,
+                }
+            except (RuntimeError, ValueError) as exc:
+                st.error(str(exc))
+                st.info("Your calculated diagnosis is unchanged. You can use Offline while the AI connection is unavailable.")
+        saved = st.session_state.get("explain_result")
+        if saved and saved["fingerprint"] == fingerprint:
+            st.caption(f"{saved['mode']} · {saved['question']}")
+            if saved["mode"].startswith("OpenAI"):
+                # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
+                st.markdown(saved["answer"].replace("$", "\\$"))
+            else:
+                st.text(saved["answer"])
+            st.caption("Review AI wording against the calculated findings above. An explanation does not confirm a physical fault or certify pump safety.")
+            st.download_button(
+                "⬇ Download explanation (PDF)",
+                data=reports.text_pdf("Explanation", f"{saved['mode']} · question: {saved['question']}", saved["answer"],
+                                      note="Review the wording against the calculated findings. An explanation does "
+                                           "not confirm a physical fault or certify pump safety."),
+                file_name="pump_detective_explanation.pdf", mime="application/pdf", key="explain_download",
+            )

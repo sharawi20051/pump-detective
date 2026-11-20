@@ -1,0 +1,11 @@
+# Pump Detective theme: clean industrial (light panel, deep blue + teal accents).
+[theme]
+base = "light"
+primaryColor = "#0B5CAD"
+backgroundColor = "#F5F7FA"
+secondaryBackgroundColor = "#E8EEF5"
+textColor = "#1F2A37"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"

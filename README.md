@@ -14,12 +14,12 @@ MONITOR → DIAGNOSE → PREDICT → RECOMMEND → MAINTAIN → VERIFY
 
 | Step | What happens | Where |
 |---|---|---|
-| Monitor | 60-day hourly sensor log (synthetic), or **your own CSV log**: flow, pressure before the strainer, suction pressure | Fouling forecast |
-| Diagnose | Flow-normalised strainer Δp; sensor glitches and debris events detected | Fouling forecast, Strainer diagnostics |
-| Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits, then checked with a backtest | Fouling forecast |
-| Recommend | Clean-by date and priority from deterministic rules; work order written by AI or offline | Fouling forecast, Detective Intelligence |
-| Maintain | Technician cleans the strainer and records one Δp reading and the flow | Verify the maintenance form |
-| Verify | RESTORED / IMPROVED, NOT CLEAN / NOT EFFECTIVE / SUSPICIOUSLY LOW, plus NPSH after cleaning | Fouling forecast |
+| Monitor | 60-day hourly sensor log (synthetic), or **your own CSV log**: flow, pressure before the strainer, suction pressure | Strainer forecast |
+| Diagnose | Flow-normalised strainer Δp; sensor glitches and debris events detected | Strainer forecast, Engineering tools |
+| Predict | Fouling trend projected to the maintenance limit and to the NPSH WARNING / CRITICAL limits, then checked with a backtest | Strainer forecast |
+| Recommend | Clean-by date and priority from deterministic rules; work order written by AI or offline | Strainer forecast (Create work order) |
+| Maintain | Technician cleans the strainer and records one Δp reading and the flow | Record cleaning result (pop-up) |
+| Verify | RESTORED / IMPROVED, NOT CLEAN / NOT EFFECTIVE / SUSPICIOUSLY LOW, plus NPSH after cleaning | Strainer forecast |
 
 ## Architecture: Python decides, AI explains
 
@@ -37,14 +37,20 @@ Every number, status, priority and date is computed in Python before the AI sees
 
 ## What is in the app
 
-| Tab | What it does |
-|---|---|
-| **Fouling forecast** | The predictive core: synthetic sensor log, flow-normalised trend, anomaly detection, forecast to each limit, clean-by recommendation, and the post-maintenance verification form. |
-| **Detective Intelligence** | Ranked findings with evidence and next checks; maintenance work order (AI or offline); downloadable report. |
-| Repair simulation | Fault diagnosis: one extra reading shows whether low suction comes from the strainer or from upstream; compares cleaning, pipe resizing and adding pressure. |
-| Strainer diagnostics | The basic "reveal the missing reading" rule on three cases. |
-| Cavitation Shield | NPSHa at the suction flange vs the Lowara demo curve; SAFE / WARNING / CRITICAL. |
-| Secondary pump · Part-load / VFD | Part-load snapshot; NPSH assessed only with user-supplied pump-specific NPSHr. |
+The main page answers three questions on one screen: is the pump OK, what should be done, and by when.
+
+- **Sidebar:** page switch, sensor data (synthetic demo, your CSV, or a one-click example log), pressure before the strainer, cleaning limit, and ⚙️ Settings (NPSH margin; AI or Offline writer when the server has an AI key).
+- **📈 Strainer forecast:**
+  - **Status row:** NPSH status now, next action and priority, complete-by date, backtest error, and the last maintenance check once one is recorded. Hover a card for a plain-language explanation.
+  - **Recommendation box:** the recommendation with three buttons. **Create work order** writes it right there. **Record cleaning result** opens a pop-up that verifies a post-cleaning reading. **Download report** saves a PDF with the status, recommendation, chart, forecast table, evidence and, once created, the work order. Under the buttons, **Why?** lists the evidence and **Ask about this forecast** answers questions.
+  - **Chart:** history and forecast, followed by detail tabs: Forecast table · Forecast check (backtest) · Events · How it works & data.
+- **🧰 Engineering tools** (separate page, run only when opened). Each tool is titled with the question it answers, with inputs on the left and results on the right: coloured status cards, plus a diagram or chart.
+  - **🔧 Repair simulation:** a suction-line diagram coloured by the readings shows whether the strainer or the system is to blame. A bar chart then compares NPSH available for cleaning, pipe resizing and adding system pressure against NPSHr and the target.
+  - **🔍 Strainer diagnostics:** the "reveal the missing reading" rule on the same diagram.
+  - **🛡️ Cavitation Shield:** the operating point plotted on the Lowara NPSHr curve, with the target margin and the catalogue reference.
+  - **⚙️ Part-load / VFD:** operating-point cards, an affinity-law chart at the current speed, and NPSH checked only with user-supplied NPSHr.
+  - **🧠 Findings & explanation:** evidence and next checks for these cases, with a PDF report.
+- **Downloads:** every report, work order and answer is a PDF (reportlab, DejaVu Sans font in `fonts/`, license included). The sensor data stays CSV so it opens in Excel and can be uploaded again.
 
 ## Engineering method
 
@@ -79,7 +85,7 @@ Every number, status, priority and date is computed in Python before the AI sees
 
 ## Use your own sensor data
 
-In **Fouling forecast**, choose **Upload my own sensor log (CSV)**. The uploaded log goes through the same pipeline as the demo: flow normalisation, anomaly and step detection, trend, forecast, backtest, recommendation, work order and verification.
+In the sidebar, choose **My own sensor log (CSV)** and drop in a file, or click **▶ Try it with the example log**. The uploaded log goes through the same pipeline as the demo: flow normalisation, anomaly and step detection, trend, forecast, backtest, recommendation, work order and verification.
 
 | Column | Unit | |
 |---|---|---|
@@ -114,10 +120,10 @@ The app cannot confirm that an uploaded log comes from this plant, or that its p
 
 ## AI maintenance recommendation
 
-Detective Intelligence opens on the Fouling forecast snapshot. Ask **"What maintenance should we schedule?"** to get a work order: Action, Priority, Complete by, Why, Also check, Confidence.
+Click **📋 Create work order** in the recommendation box to get a work order: Action, Priority, Complete by, Why, Also check, Confidence.
 
 - **Priority rule:** URGENT = due now, HIGH = within 14 days, PLANNED = later, NONE = nothing within 180 days. It is set by the rules, not the AI.
-- **OpenAI mode** (optional, `OPENAI_API_KEY`): the model may use only the forecast's own dates, priority and ranges, must state that the data are synthetic, and must report verification verdicts exactly.
+- **AI mode** (optional, set up by the developer, never by users): put `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) in `.streamlit/secrets.toml` (see `secrets.toml.example`; the real file is git-ignored) or in the host's secrets settings. The key stays on the server. With a key, Settings offers AI or Offline; without one, the app uses Offline and shows no AI option. In AI mode, the model may use only the forecast's own dates, priority and ranges, must state that the data are synthetic, and must report verification verdicts exactly.
 - **Offline mode** (the default without a key): the same work order, built deterministically.
 
 ## Limitations
@@ -156,4 +162,4 @@ Live sensor ingestion (BMS / historian connection instead of CSV files), alerts,
 
 ## Tools
 
-Python (calculations and rules), numpy and pandas (trend analysis), Streamlit and Altair (interface and charts), OpenAI Responses API (optional explanations). ChatGPT and Claude Code assisted with code, review and documentation. `archive/` holds an earlier version for reference only.
+Python (calculations and rules), numpy and pandas (trend analysis), Streamlit and Altair (interface and charts; custom theme in `.streamlit/config.toml`, `ui.py` and `visuals.py`), reportlab (PDF reports), OpenAI Responses API (optional explanations). ChatGPT and Claude Code assisted with code, review and documentation. `archive/` holds an earlier version for reference only.
