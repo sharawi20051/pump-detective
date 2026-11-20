@@ -13,13 +13,15 @@ from xml.sax.saxutils import escape
 from reportlab.graphics.charts.lineplots import LinePlot
 from reportlab.graphics.shapes import Drawing, Line, String
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle)
+
+import arabic
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 NAVY, BLUE, TEAL = colors.HexColor("#0A2540"), colors.HexColor("#0B5CAD"), colors.HexColor("#0E9384")
@@ -64,6 +66,26 @@ def _styles():
 
 def _p(text, style):
     return Paragraph(escape(str(text)).replace("\n", "<br/>"), style)
+
+
+TEXT_WIDTH = A4[0] - 30 * mm
+
+
+def _text(text, style):
+    """Multi-line text as flowables. Lines containing Arabic are shaped, wrapped, put in right-to-left order
+    and right-aligned; other lines are ordinary paragraphs."""
+    rtl = ParagraphStyle(style.name + "-rtl", parent=style, alignment=TA_RIGHT)
+    measure = lambda t: pdfmetrics.stringWidth(t, style.fontName, style.fontSize)  # noqa: E731
+    flowables = []
+    for line in str(text).split("\n"):
+        if not line.strip():
+            flowables.append(Spacer(1, style.leading * 0.6))
+        elif arabic.has_arabic(line):
+            for row in arabic.wrap(line, TEXT_WIDTH - 24, measure):
+                flowables.append(Paragraph(escape(arabic.visual(row)), rtl))
+        else:
+            flowables.append(Paragraph(escape(line), style))
+    return flowables
 
 
 def _header_footer(title):
@@ -131,7 +153,10 @@ def _trend_chart(daily, forecast, limits):
     plot = LinePlot()
     plot.x, plot.y, plot.width, plot.height = 32, 22, width - 44, height - 34
     series = [s for s in (daily, forecast) if s]
-    ys = [y for s in series for _, y in s] + [v for _, v in limits if v > 0]
+    data_top = max(y for s in series for _, y in s)
+    # Scale to the data; show a limit only if it is within reach (as the app's chart does).
+    shown = [(name, v) for name, v in limits if 0 < v <= 3 * data_top]
+    top = max([data_top] + [v for _, v in shown]) * 1.1
     xs = [x for s in series for x, _ in s]
     plot.data = series
     plot.lines[0].strokeColor, plot.lines[0].strokeWidth = BLUE, 1.4
@@ -139,7 +164,7 @@ def _trend_chart(daily, forecast, limits):
         plot.lines[1].strokeColor, plot.lines[1].strokeWidth = colors.HexColor("#E07B00"), 1.4
         plot.lines[1].strokeDashArray = [4, 3]
     plot.xValueAxis.valueMin, plot.xValueAxis.valueMax = min(xs), max(xs)
-    plot.yValueAxis.valueMin, plot.yValueAxis.valueMax = 0, max(ys) * 1.1
+    plot.yValueAxis.valueMin, plot.yValueAxis.valueMax = 0, top
     for axis in (plot.xValueAxis, plot.yValueAxis):
         axis.labels.fontName, axis.labels.fontSize = "DejaVu", 7
         axis.strokeColor = GREY
@@ -147,15 +172,18 @@ def _trend_chart(daily, forecast, limits):
     drawing.add(plot)
     palette = ["#6B7280", "#D4A017", "#C62828"]
     for (name, value), colour in zip(limits, palette):
-        if value <= 0:
+        if (name, value) not in shown:
             continue
         y = plot.y + plot.height * value / plot.yValueAxis.valueMax
         drawing.add(Line(plot.x, y, plot.x + plot.width, y, strokeColor=colors.HexColor(colour), strokeWidth=0.8,
                          strokeDashArray=[2, 2]))
         drawing.add(String(plot.x + plot.width - 2, y + 2, name, fontName="DejaVu", fontSize=6.5,
                            fillColor=colors.HexColor(colour), textAnchor="end"))
-    drawing.add(String(plot.x, height - 8, "Strainer Δp* (kPa) · blue: daily history · orange: forecast",
-                       fontName="DejaVu", fontSize=7.5, fillColor=GREY))
+    hidden = [name for name, v in limits if v > 3 * data_top]
+    caption = "Strainer Δp* (kPa) · blue: daily history" + (" · orange: forecast" if forecast else "")
+    if hidden:
+        caption += f" · {', '.join(hidden)} far above this range (not drawn)"
+    drawing.add(String(plot.x, height - 8, caption, fontName="DejaVu", fontSize=7.5, fillColor=GREY))
     drawing.add(String(plot.x + plot.width, 4, "day of log", fontName="DejaVu", fontSize=7, fillColor=GREY,
                        textAnchor="end"))
     return drawing
@@ -213,7 +241,7 @@ def forecast_report_pdf(summary, findings, cards, chart, work_order=None):
         story.append(KeepTogether([_p(item["Finding"], s["cellb"]), _p(item["Evidence"], s["body"]),
                                    _p("Next check: " + item["Next check"], s["small"]), Spacer(1, 5)]))
     if work_order:
-        story += [_p("Work order", s["h"]), _p(work_order, s["mono"])]
+        story += [_p("Work order", s["h"])] + _text(work_order, s["mono"])
     story += [Spacer(1, 8), _p("Assumptions: " + summary["uncertainty_note"] + " Water at 20 °C; absolute suction "
                                "pressure at the NPSH datum; Lowara reference curve; no overall pump-health verdict.",
                                s["small"])]
@@ -223,10 +251,58 @@ def forecast_report_pdf(summary, findings, cards, chart, work_order=None):
 def text_pdf(title, subtitle, body, note=None, extra_rows=None):
     """A simple document: title, subtitle, optional key/value table, then the body text (line breaks kept)."""
     s = _styles()
-    story = [_p(title, s["title"]), _p(f"{subtitle} · generated {datetime.now():%Y-%m-%d %H:%M}", s["sub"]), Spacer(1, 8)]
+    story = [_p(title, s["title"])] + _text(f"{subtitle} · generated {datetime.now():%Y-%m-%d %H:%M}", s["sub"])
+    story.append(Spacer(1, 8))
     if extra_rows:
         story += [_grid([["Item", "Value"]] + [list(r) for r in extra_rows], s, widths=[62 * mm, 118 * mm]), Spacer(1, 8)]
-    story.append(_p(body, s["mono"]))
+    story += _text(body, s["mono"])
+    if note:
+        story += [Spacer(1, 10), _p(note, s["small"])]
+    return _build(title, story)
+
+
+def sensor_data_pdf(summary, info_rows, daily_rows, chart):
+    """Readable sensor-data report: what the log contains, the chart, and one row per day."""
+    s = _styles()
+    story = [
+        _p("Sensor data report", s["title"]),
+        _p(f"{summary['asset']}\n{summary['data_origin']} · case: {summary['scenario']} · generated "
+           f"{datetime.now():%Y-%m-%d %H:%M}", s["sub"]),
+        _p("About this log", s["h"]),
+        _grid([["Item", "Value"]] + [list(r) for r in info_rows], s, widths=[62 * mm, 118 * mm]),
+        _p("Strainer pressure drop, day by day", s["h"]),
+        _trend_chart(*chart),
+        _p("Daily values", s["h"]),
+        _p("Δp is the measured drop across the strainer; Δp* is the same drop corrected to design flow, which is "
+           "what the forecast trends. Flagged readings are excluded as sensor glitches.", s["small"]),
+        Spacer(1, 4),
+        _grid([["Date", "Mean flow (L/s)", "Median Δp (kPa)", "Daily Δp* (kPa)", "Hours used", "Flagged", "Event"]]
+              + daily_rows, s, widths=[26 * mm, 24 * mm, 25 * mm, 25 * mm, 20 * mm, 18 * mm, 42 * mm]),
+        Spacer(1, 8),
+        _p("The raw hourly numbers are available as a CSV file (for Excel or re-upload) under 'Raw data for "
+           "engineers' in the app.", s["small"]),
+    ]
+    return _build("Sensor data report", story)
+
+
+def tool_pdf(title, question, intro, cards, sections, note=None):
+    """Report for one engineering tool.
+
+    ``cards``: status boxes (label, value, sub, key). ``sections``: list of (heading, content) where content is
+    text or a table given as a list of rows whose first row is the header.
+    """
+    s = _styles()
+    story = [_p(title, s["title"]), _p(question, s["h"]),
+             _p(f"{intro} · generated {datetime.now():%Y-%m-%d %H:%M}", s["sub"]), Spacer(1, 8)]
+    if cards:
+        story += [_status_row([c[:4] for c in cards], s), Spacer(1, 6)]
+    for heading, content in sections:
+        story.append(_p(heading, s["h"]))
+        if isinstance(content, list):
+            columns = len(content[0])
+            story.append(_grid(content, s, widths=[TEXT_WIDTH / columns] * columns))
+        else:
+            story += _text(content, s["body"])
     if note:
         story += [Spacer(1, 10), _p(note, s["small"])]
     return _build(title, story)

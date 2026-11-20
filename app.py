@@ -45,18 +45,33 @@ NPSH_TOOLTIP = ("NPSH = pressure head at the pump inlet above the point where wa
                 "the water flashes to vapour bubbles (cavitation), which erodes the impeller.")
 
 
-def show_npsh_assessment(available, required, required_margin, demo_curve=True):
-    """NPSH result as four coloured cards: status, available, required, margin against the target."""
+def npsh_cards(available, required, required_margin, demo_curve=True):
+    """NPSH result as four cards: status, available, required, margin against the target."""
     actual, surplus, status = npsh_assessment(available, required, required_margin)
     meaning = {"SAFE": "target margin met", "WARNING": "above NPSHr, below the target margin",
                "CRITICAL": "below NPSHr: cavitation expected"}[status]
-    ui.status_cards([
+    return [
         ("NPSH status", status, meaning, status, NPSH_TOOLTIP),
         ("NPSH available", f"{available:.2f} m", "what the system supplies", "PLANNED"),
         ("NPSH required", f"{required:.2f} m", "Lowara demo curve (approx.)" if demo_curve else "your pump's curve",
          "PLANNED"),
         ("Margin vs target", f"{surplus:+.2f} m", f"actual {actual:+.2f} m · target {required_margin:.2f} m", status),
-    ])
+    ]
+
+
+def show_npsh_assessment(available, required, required_margin, demo_curve=True):
+    ui.status_cards(npsh_cards(available, required, required_margin, demo_curve))
+
+
+def tool_download(title, question, intro, cards, sections, file_name, key):
+    """'Download this result (PDF)' for one tool."""
+    st.download_button(
+        "⬇ Download this result (PDF)",
+        data=reports.tool_pdf(title, question, intro, cards, sections,
+                              note="Educational simulation with demonstration values. Results must be checked by a "
+                                   "qualified engineer; SAFE does not certify pump operation."),
+        file_name=file_name, mime="application/pdf", key=key,
+    )
 
 
 # Strainer verdict for the diagram; mirrors pump_detective.diagnose_filter.
@@ -651,6 +666,15 @@ def forecast_report_pdf(payload):
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=20)
+def sensor_data_pdf(payload):
+    """Build the sensor-data PDF once per distinct content (``payload`` is JSON text)."""
+    data = json.loads(payload)
+    daily, forecast, limits = data["chart"]
+    return reports.sensor_data_pdf(data["summary"], data["info"], data["daily"],
+                                   ([tuple(p) for p in daily], [tuple(p) for p in forecast], [tuple(x) for x in limits]))
+
+
 @st.dialog("Record the cleaning result")
 def verify_dialog(context):
     """Post-maintenance reading → verdict. ``context`` carries the forecast values the verdict depends on."""
@@ -789,20 +813,34 @@ if on_tools_page:
         pressure_drop, suggestion = diagnose_filter(measured_upstream, downstream)
         d_verdict = strainer_verdict(measured_upstream, downstream)
         with d_out:
-            ui.status_cards([
+            d_cards = [
                 ("Before the strainer", "Hidden" if measured_upstream is None else f"{measured_upstream:g} kPa abs",
                  "reveal it to diagnose" if measured_upstream is None else "measured", 
                  "NOT ASSESSED" if measured_upstream is None else "PLANNED"),
                 ("Pressure drop", "—" if pressure_drop is None else f"{pressure_drop:g} kPa",
                  f"clean reference {CLEAN_FILTER_DROP_KPA:g} ± {TOLERANCE_KPA:g} kPa", VERDICT_KEY[d_verdict]),
                 ("Verdict", VERDICT_TEXT[d_verdict], "from the strainer pressure drop", VERDICT_KEY[d_verdict]),
-            ])
+            ]
+            ui.status_cards(d_cards)
             st.markdown(visuals.suction_line_svg(measured_upstream, downstream, pressure_drop, d_verdict),
                         unsafe_allow_html=True)
             verdict_alert(d_verdict, suggestion)
         with st.expander("Assumptions"):
             st.caption("Both readings are absolute pressures taken at the same flow. The 5 kPa clean drop and ±2 kPa "
                        "tolerance are demonstration values, not field alarm thresholds.")
+        tool_download(
+            "Strainer diagnostics", "Is the strainer blocked, or is the problem upstream?",
+            f"Test case: {scenario} · simulated absolute pressures at {DESIGN_FLOW_LPS:g} L/s", d_cards,
+            [("Readings", [["Reading", "Value"],
+                           ["Before the strainer", "Hidden (not yet measured)" if measured_upstream is None
+                            else f"{measured_upstream:g} kPa abs"],
+                           ["After the strainer (pump suction)", f"{downstream:g} kPa abs"],
+                           ["Pressure drop", "—" if pressure_drop is None else f"{pressure_drop:g} kPa"],
+                           ["Clean-strainer reference", f"{CLEAN_FILTER_DROP_KPA:g} ± {TOLERANCE_KPA:g} kPa"],
+                           ["Normal suction for this plant", f"{NORMAL_SUCTION_KPA_ABS:g} kPa abs"]]),
+             ("Suggested check", suggestion)],
+            "pump_detective_strainer_diagnostics.pdf", "dl_diag",
+        )
 
 
     with cavitation:
@@ -848,6 +886,31 @@ if on_tools_page:
             st.markdown("[Xylem Lowara e-NSC catalog, page 100]"
                         "(https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/"
                         "191002951_nsc-50hz_en.pdf#page=100)")
+        c_sections = [("Operating point", [["Quantity", "Value"],
+                                           ["Flow", f"{flow:g} m³/h ({flow / 3.6:.2f} L/s)"],
+                                           ["Absolute suction pressure", f"{pressure_abs:g} kPa abs "
+                                            f"({pressure_abs - ATMOSPHERIC_KPA_ABS:+.1f} kPa gauge)"],
+                                           ["Velocity at the DN100 flange", f"{suction_velocity(flow, diameter):.2f} m/s"],
+                                           ["NPSH safety margin (target)", f"{engineer_margin:.2f} m"]])]
+        if problem:
+            c_sections.append(("Why NPSH is not assessed", problem))
+        else:
+            c_sections.append(("Catalogue reference", f"NPSHr + {CATALOG_ALLOWANCE_M:.2f} m = {benchmark:.2f} m: "
+                                                      f"{'met' if available >= benchmark else 'not met'} "
+                                                      "(shown separately; not added to the margin)."))
+        c_sections.append(("Lowara NSC 80-200 reference curve (approximate)",
+                           [["Flow (m³/h)", "NPSHr (m)", f"NPSHr + {engineer_margin:.2f} m target (m)"]]
+                           + [[f"{q:g}", f"{h:.2f}", f"{h + engineer_margin:.2f}"] for q, h in LOWARA_CURVE]))
+        if pressure_abs < ATMOSPHERIC_KPA_ABS:
+            c_sections.append(("Note", "Suction is below atmospheric. In a closed chilled-water loop that is abnormal "
+                                       "in itself: check fill pressure and the expansion tank."))
+        tool_download(
+            "Cavitation Shield", "Will the pump cavitate at this operating point?",
+            "Lowara NSC 80-200/55 at about 1450 rpm · water at 20 °C",
+            [("NPSH status", "NOT ASSESSED", "the inputs cannot give a valid NPSHa", "NOT ASSESSED")] if problem
+            else npsh_cards(available, required, engineer_margin), c_sections,
+            "pump_detective_cavitation_shield.pdf", "dl_cav",
+        )
 
 
     with repair:
@@ -932,6 +995,35 @@ if on_tools_page:
                     "models straight-pipe friction only (no fittings). Cleaning sets the strainer loss to the 5 kPa "
                     "reference. The added pressure is the amount needed to reach NPSHr plus the engineer margin."
                 )
+        r_sections = [
+            ("Fault case", f"{repair_case}: a rooftop plant has lost fill pressure; pump suction reads "
+                           f"{suction_kpa:g} kPa abs (normal {NORMAL_SUCTION_KPA_ABS:g} kPa abs)."),
+            ("Readings", [["Reading", "Value"],
+                          ["Before the strainer", f"{upstream_kpa:g} kPa abs" if reveal else "Hidden (not yet measured)"],
+                          ["Pump suction", f"{suction_kpa:g} kPa abs"],
+                          ["Strainer pressure drop", "—" if drop is None else f"{drop:g} kPa"],
+                          ["Verdict", VERDICT_TEXT[r_verdict]]]),
+            ("Suggested check", suggestion),
+        ]
+        if reveal:
+            r_sections.append(("Repair options (same flow, same starting condition)",
+                               [["Change", "NPSHa (m)", "Margin (m)", "Vs target (m)", "Status"]]
+                               + [[label, f"{head:.2f}", f"{npsh_assessment(head, required, engineer_margin)[0]:+.2f}",
+                                   f"{npsh_assessment(head, required, engineer_margin)[1]:+.2f}",
+                                   npsh_assessment(head, required, engineer_margin)[2]] for label, head in options]))
+            r_sections.append(("Conclusion", (
+                f"Cleaning the strainer is enough: NPSH available rises from {before:.2f} m to {after_cleaning:.2f} m, "
+                f"above the {engineer_target:.2f} m target." if after_cleaning >= engineer_target else
+                f"Cleaning alone is not enough: {after_cleaning:.2f} m stays below the {engineer_target:.2f} m target. "
+                "Restore system pressure (fill pressure, expansion tank).")
+                + (f" Even with a clean strainer, suction stays at {restored_suction:.0f} kPa abs, below atmospheric: "
+                   "the root cause is the lost fill pressure." if restored_suction < ATMOSPHERIC_KPA_ABS else "")))
+        tool_download(
+            "Repair simulation", "Which fix actually restores the pump's suction?",
+            f"{repair_case} · simulated absolute pressures · Lowara demo/reference pump · {DESIGN_FLOW_LPS:g} L/s",
+            npsh_cards(before, required, engineer_margin), r_sections,
+            "pump_detective_repair_simulation.pdf", "dl_repair",
+        )
 
 
 @st.cache_data(show_spinner=False)
@@ -980,7 +1072,7 @@ if not on_tools_page:
                     "detected and the trend restarts after the last one."
                 )
                 if os.path.exists(EXAMPLE_LOG_PATH):
-                    st.download_button("Download the example log", read_example_log(),
+                    st.download_button("⬇ Example log (CSV, the upload format)", read_example_log(),
                                        file_name="example_sensor_log.csv", mime="text/csv", key="fc_example")
             if fc_bytes is not None:
                 try:
@@ -1437,17 +1529,56 @@ if not on_tools_page:
     }
 
     with tab_how:
-        fc_export = fc_log.assign(normalised_dp_kpa=fc_norm).round(3)
-        fc_export.insert(0, "timestamp", pd.to_datetime(fc_hourly["time"]).dt.strftime("%Y-%m-%d %H:%M"))
+        # Readable data report (PDF) first; the raw CSV is tucked away for engineers.
+        fc_day_idx = (fc_log["hour"].to_numpy() // fc.HOURS_PER_DAY).astype(int)
+        fc_flagged = np.zeros(len(fc_log), dtype=bool)
+        fc_flagged[list(fc_spikes)] = True
+        fc_by_day = pd.DataFrame({
+            "day": fc_day_idx, "flow": fc_log["flow_lps"].to_numpy(), "raw": fc_log["dp_kpa"].to_numpy(),
+            "used": np.isfinite(fc_norm) & ~fc_flagged, "flag": fc_flagged,
+        }).groupby("day").agg(flow=("flow", "mean"), raw=("raw", "median"), used=("used", "sum"), flag=("flag", "sum"))
+        fc_event_name = {d: ("cleaning (sudden drop)" if d in fc_drops else "debris step") for d in fc_steps}
+
+        def fc_num(value, fmt):
+            return "—" if value is None or not np.isfinite(value) else format(value, fmt)
+
+        fc_data_payload = json.dumps({
+            "summary": forecast_summary,
+            "info": [
+                ["Source", forecast_summary["data_origin"]],
+                ["Period", f"{fc_day_to_date(0):%d %b %Y} to {fc_today:%d %b %Y} ({len(fc_daily)} days)"],
+                ["Readings", (f"{fc_up_info['rows_read']:,} rows, about every {fc_up_info['interval_minutes']:g} min, "
+                              "averaged to hourly values" if fc_upload and fc_up_info["interval_minutes"]
+                              else f"{len(fc_log):,} hourly readings")],
+                ["Design flow", f"{DESIGN_FLOW_LPS:g} L/s (Δp* is corrected to this flow)"],
+                ["Pressure before the strainer", f"{fc_upstream:g} kPa abs"],
+                ["Flagged readings", f"{len(fc_spikes)} (excluded as sensor glitches)"],
+                ["Step changes", ", ".join(f"{fc_day_to_date(d):%d %b} ({fc_event_name[d]})" for d in fc_steps) or "none"],
+            ],
+            "daily": [[f"{fc_day_to_date(d):%d %b %Y}", fc_num(row.flow, ".1f"), fc_num(row.raw, ".2f"),
+                       fc_num(fc_daily[d] if d < len(fc_daily) else None, ".2f"), str(int(row.used)), str(int(row.flag)),
+                       fc_event_name.get(d, "")] for d, row in fc_by_day.iterrows()],
+            "chart": [[(d, round(float(v), 3)) for d, v in enumerate(fc_daily) if np.isfinite(v)], [],
+                      [("Cleaning limit", float(fc_maint_limit)), ("NPSH WARNING", float(fc_warn_dp)),
+                       ("NPSH CRITICAL", float(fc_crit_dp))]],
+        }, sort_keys=True, default=str)
         st.download_button(
-            "⬇ Sensor data (CSV, for Excel or re-upload)",
-            data=fc_export.to_csv(index=False),
-            file_name=("pump_detective_hourly_log.csv" if fc_upload else
-                       f"pump_detective_synthetic_log_{fc_scenario.lower().replace(' ', '_')}.csv"),
-            mime="text/csv", key="fc_download",
-            help="The raw hourly data behind the chart. Data stays CSV so it opens in Excel and can be uploaded "
-                 "again; the readable report is the PDF on the recommendation box.",
+            "⬇ Sensor data report (PDF)", data=sensor_data_pdf(fc_data_payload),
+            file_name="pump_detective_sensor_data.pdf", mime="application/pdf", key="fc_data_pdf",
+            help="What the log contains, the chart and one row per day.",
         )
+        with st.expander("Raw data for engineers (CSV, opens in Excel)"):
+            st.caption("The hourly numbers behind the chart, as a spreadsheet file. Open it with Excel, or upload it "
+                       "again with 'My own sensor log'. It is not a PDF, so a PDF reader cannot open it.")
+            fc_export = fc_log.assign(normalised_dp_kpa=fc_norm).round(3)
+            fc_export.insert(0, "timestamp", pd.to_datetime(fc_hourly["time"]).dt.strftime("%Y-%m-%d %H:%M"))
+            st.download_button(
+                "⬇ Raw hourly data (CSV)",
+                data=fc_export.to_csv(index=False),
+                file_name=("pump_detective_hourly_log.csv" if fc_upload else
+                           f"pump_detective_synthetic_log_{fc_scenario.lower().replace(' ', '_')}.csv"),
+                mime="text/csv", key="fc_download",
+            )
 
 
     fc_findings = forecast_findings(forecast_summary)
@@ -1608,6 +1739,41 @@ if on_tools_page:
             st.caption("Head uses differential pressure only, assuming equal tap elevations and velocity heads. "
                        "Hydraulic power is not motor input power. NPSHa assumes absolute static pressure at the pump's "
                        "NPSH datum and water at 20 °C. Inputs are demo values.")
+        if secondary_problem:
+            pl_npsh = ("NOT ASSESSED", secondary_problem)
+        elif actual_q == 0:
+            pl_npsh = ("NOT ASSESSED", "zero flow")
+        elif secondary_assessable:
+            pl_npsh = (npsh_assessment(secondary_available, secondary_required, engineer_margin)[2],
+                       f"with user-confirmed NPSHr {secondary_required:.2f} m")
+        else:
+            pl_npsh = ("NOT ASSESSED", "pump-specific NPSHr not confirmed")
+        tool_download(
+            "Secondary pump · Part-load / VFD", "Is the secondary pump safe at part load?",
+            "Operating snapshot entered by the user · water at 20 °C",
+            [("Flow vs reference", f"{load_pct:.0f} %", f"{actual_q:.1f} of {design_q:.1f} L/s", "PLANNED"),
+             ("Speed", f"{speed_pct} %", f"demand context {active_floors} %", "PLANNED"),
+             ("Pump head", f"{measured_head:.1f} m", f"{delta_p:g} kPa differential", "PLANNED"),
+             ("NPSH status", pl_npsh[0], pl_npsh[1][:60], pl_npsh[0])],
+            [("Operating point", [["Quantity", "Value"],
+                                  ["Operating flow", f"{actual_q:.2f} L/s ({load_pct:.0f} % of {design_q:.1f} L/s)"],
+                                  ["Speed", f"{speed_pct} % of reference"],
+                                  ["Differential pressure / head", f"{delta_p:g} kPa / {measured_head:.2f} m"],
+                                  ["Hydraulic power (Δp × Q)", f"{hydraulic_kw:.2f} kW"],
+                                  ["Cooling-demand context", f"{active_floors} % of floors (not used in calculations)"]]),
+             ("Suction and NPSH", [["Quantity", "Value"],
+                                   ["Absolute suction pressure", f"{secondary_pressure:g} kPa abs"],
+                                   ["Suction internal diameter", f"{secondary_diameter:g} mm"],
+                                   ["NPSH available", "—" if secondary_problem else f"{secondary_available:.2f} m"],
+                                   ["NPSHr (pump curve)", f"{secondary_required:.2f} m (confirmed)" if secondary_assessable
+                                    else "not confirmed"],
+                                   ["NPSH safety margin (target)", f"{engineer_margin:.2f} m"],
+                                   ["Status", f"{pl_npsh[0]} · {pl_npsh[1]}"]]),
+             ("Affinity laws (illustration)", [["Speed", "Flow", "Head", "Ideal shaft power"]]
+              + [[f"{p} %", f"{p} %", f"{(p / 100) ** 2 * 100:.1f} %", f"{(p / 100) ** 3 * 100:.1f} %"]
+                 for p in sorted({25, 50, 75, 100, speed_pct})])],
+            "pump_detective_part_load.pdf", "dl_partload",
+        )
 
 
 if on_tools_page:

@@ -50,7 +50,7 @@ The main page answers three questions on one screen: is the pump OK, what should
   - **🛡️ Cavitation Shield:** the operating point plotted on the Lowara NPSHr curve, with the target margin and the catalogue reference.
   - **⚙️ Part-load / VFD:** operating-point cards, an affinity-law chart at the current speed, and NPSH checked only with user-supplied NPSHr.
   - **🧠 Findings & explanation:** evidence and next checks for these cases, with a PDF report.
-- **Downloads:** every report, work order and answer is a PDF (reportlab, DejaVu Sans font in `fonts/`, license included). The sensor data stays CSV so it opens in Excel and can be uploaded again.
+- **Downloads:** every readable document is a PDF: the forecast report, the work order, answers, the sensor data report, a PDF for each engineering tool, and the tools' diagnostic report and explanation. PDFs use the DejaVu Sans font in `fonts/` (license included), so Δ, ± and similar symbols print correctly. Arabic text (for example an AI answer to an Arabic question) is shaped and laid out right to left by `arabic.py`, with no extra package. Data files stay CSV, because they are for Excel or for uploading again: the raw hourly data (in "Raw data for engineers") and the example log.
 
 ## Engineering method
 
