@@ -4,7 +4,7 @@
 
 A clogging suction strainer slowly eats a pump's NPSH safety margin until the pump cavitates. Pump Detective trends strainer pressure drop, corrects it for flow, **predicts when the NPSH margin will be lost**, schedules cleaning before that happens, writes the work order, and **verifies after maintenance whether the cleaning actually worked**.
 
-**Live app:** _link to be added_ · All data are **synthetic**. Nothing has been validated with field measurements.
+**Live app:**https://pump-detective.streamlit.app/· All data are **synthetic**. Nothing has been validated with field measurements.
 
 ## The story
 
