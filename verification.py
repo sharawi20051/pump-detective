@@ -135,7 +135,7 @@ def verify_cleaning(dp_after_kpa, flow_after_lps, q_ref_lps, baseline_kpa, maint
     band = f"{baseline_kpa:.2f} ± {big_u:.2f} kPa"
     if dp_star >= maintenance_limit_kpa:
         return Verification("NOT EFFECTIVE", dp_star, baseline_kpa, big_u, u_star, reduction,
-                            f"Δp* {dp_star:.2f} kPa is still at or above the {maintenance_limit_kpa:g} kPa maintenance limit.",
+                            f"Δp* {dp_star:.2f} kPa is still at or above the {maintenance_limit_kpa:g} kPa cleaning limit.",
                             "Re-inspect the strainer: basket seating, remaining debris, correct strainer cleaned.")
     if diff < -big_u:
         return Verification("SUSPICIOUSLY LOW", dp_star, baseline_kpa, big_u, u_star, reduction,
@@ -147,5 +147,5 @@ def verify_cleaning(dp_after_kpa, flow_after_lps, q_ref_lps, baseline_kpa, maint
                             f"Δp* {dp_star:.2f} kPa is within the clean band {band}.",
                             "Close the work order and use this reading as the new trend starting point.")
     return Verification("IMPROVED, NOT CLEAN", dp_star, baseline_kpa, big_u, u_star, reduction,
-                        f"Δp* {dp_star:.2f} kPa is above the clean band {band} but below the maintenance limit.",
+                        f"Δp* {dp_star:.2f} kPa is above the clean band {band} but below the cleaning limit.",
                         "Check basket seating and residual debris, and confirm the clean baseline is current.")

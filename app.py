@@ -224,7 +224,7 @@ def forecast_findings(summary):
 
     if not reco["cleaning_alone_restores_npsh_margin"]:
         due = reco.get("strainer_cleaning_due")
-        add(2, f"Strainer maintenance limit due {due}" if due else "No strainer maintenance limit forecast within 180 days",
+        add(2, f"Strainer cleaning limit due {due}" if due else "No strainer cleaning limit forecast within 180 days",
             f"Δp* {dp_now:.1f} kPa (clean {summary['clean_strainer_dp_kpa']:g} kPa), rising {rate:+.2f} %/day.",
             "Keep the strainer on its maintenance schedule, but it is not the cause of the NPSH deficit.")
     elif reco["priority"] != "NONE":
@@ -311,7 +311,7 @@ def offline_work_order(snapshot):
     also = []
     if not reco["cleaning_alone_restores_npsh_margin"]:
         due = reco.get("strainer_cleaning_due")
-        also.append("Strainer maintenance limit "
+        also.append("Strainer cleaning limit "
                     + (f"forecast by {due}; keep it on schedule." if due else "not forecast within 180 days."))
     elif forecast["suction_now_kpa_abs"] < ATMOSPHERIC_KPA_ABS:
         also.append("Suction is below atmospheric pressure: check fill pressure and the expansion tank.")
@@ -388,8 +388,8 @@ SUSPICIOUSLY LOW must be reported as a possible damaged screen, bypass or sensor
 If forecast.backtest is present, use its figures in Confidence exactly as given; it scores the
 method on the same log, not general field performance.
 Write for a maintenance technician. Use the symbols Δp*, ±, ° and % as plain text; never LaTeX
-or $ math notation. Never mention internal field names (words joined by underscores); say what
-they mean instead.
+or $ math notation. Never mention internal field names (words joined by underscores) or the
+internal priority numbers of findings; say what they mean instead.
 """
 
 
@@ -479,7 +479,7 @@ def request_gemini_explanation(snapshot, question, api_key, model):
             headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
             method="POST",
         )
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=25) as response:
             return json.load(response)
 
     def google_reason(exc):
@@ -491,12 +491,12 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
 
     # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the others in turn,
-    # but stop starting new attempts after about 50 seconds so nobody waits too long.
+    # but stop starting new attempts after about 30 seconds so nobody waits too long.
     models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()]
     started = time_module.monotonic()
     try:
         for attempt, model_name in enumerate(models):
-            last = attempt == len(models) - 1 or time_module.monotonic() - started > 50
+            last = attempt == len(models) - 1 or time_module.monotonic() - started > 30
             try:
                 try:
                     result = send(model_name, payload)
@@ -734,7 +734,7 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
                 # Never leave the user without an answer: the rule-based writer uses the same calculations.
                 offline = generate_answer(snapshot, question, topic, {**ai, "use_ai": False})
                 st.session_state[state_key] = {"fingerprint": fingerprint, "answer": offline, "mode": AI_OFFLINE,
-                                               "question": question, "note": f"{AI_BUSY_NOTE} ({exc})"}
+                                               "question": question, "note": AI_BUSY_NOTE}
     return snapshot_text
 
 
@@ -884,7 +884,8 @@ def server_setting(name, default=""):
 
 
 # Gemini models tried in order when the configured one is busy: the lighter Flash-Lite answers fastest on the free tier.
-GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash")
+# Current names (Google retires older ones for new users and says which name to use instead).
+GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-3.8-flash", "gemini-flash-latest")
 AI_BUSY_NOTE = ("The AI service is busy right now, so this is the rule-based version, built from the same "
                 "calculations. Try the button again in a minute for the AI-written text.")
 # The developer sets one key in .streamlit/secrets.toml (or the host's secrets). OpenAI is used when its key is
@@ -1210,7 +1211,7 @@ if not on_tools_page:
                 "Pressure before the strainer (kPa abs)", min_value=5.0, max_value=400.0,
                 value=33.0, step=1.0, key="fc_upstream",
                 help="33 kPa abs is the demo's low-pressure rooftop plant (suction below atmospheric). "
-                     "Try 105 kPa abs for a healthy plant, where only the maintenance limit matters.",
+                     "Try 105 kPa abs for a healthy plant, where only the cleaning limit matters.",
             )
         fc_maint_limit = st.number_input(
             "Strainer cleaning limit Δp (kPa)", min_value=CLEAN_FILTER_DROP_KPA + 0.5, value=20.0, step=0.5,
@@ -1416,8 +1417,10 @@ if not on_tools_page:
         rule_layer = alt.Chart(fc_rules).mark_rule(strokeWidth=1.5).encode(
             y=alt.Y("limit:Q", scale=y_scale),
             color=alt.Color("Threshold:N", scale=alt.Scale(
-                domain=["Cleaning limit", "NPSH WARNING", "NPSH CRITICAL"],
-                range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
+                # Legend lists only the lines actually drawn (far-away NPSH limits are named in a note instead).
+                domain=list(fc_rules["Threshold"]),
+                range=[{"Cleaning limit": "#6b7280", "NPSH WARNING": "#d4a017", "NPSH CRITICAL": "#c62828"}[n]
+                       for n in fc_rules["Threshold"]]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
             tooltip=["Threshold", alt.Tooltip("limit:Q", format=".1f")],
         )
         today_layer = alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_today, time(23, 59))]})).mark_rule(
@@ -2112,10 +2115,10 @@ if on_tools_page:
                     try:
                         with st.spinner("Explaining the selected snapshot…"):
                             answer = request_ai(explanation_snapshot, question, ai)
-                    except RuntimeError as exc:
+                    except RuntimeError:
                         answer = (offline_work_order(explanation_snapshot) if topic == MAINTENANCE_TOPIC
                                   else offline_explanation(explanation_snapshot, topic))
-                        busy_note = f"{AI_BUSY_NOTE} ({exc})"
+                        busy_note = AI_BUSY_NOTE
                 elif topic == MAINTENANCE_TOPIC:
                     answer = offline_work_order(explanation_snapshot)
                 else:
