@@ -19,6 +19,7 @@ import streamlit as st
 
 import forecast as fc
 import reports
+from arabic import has_arabic
 import ui
 import visuals
 import verification as vf
@@ -560,7 +561,17 @@ def tidy_ai_text(text):
             math = math.replace(code, symbol)
         math = re.sub(r"\\[A-Za-z]+", "", math).replace("^", "").replace("{", "").replace("}", "")
         return re.sub(r"Δ\s+", "Δ", math).strip()
-    return re.sub(r"\$([^$\n]*\\[^$\n]*)\$", plain, text)
+    text = re.sub(r"\$([^$\n]*\\[^$\n]*)\$", plain, text)
+    return re.sub(r"\b(\d) (\d{3}-\d{2}-\d{2})\b", r"\1\2", text)  # "2 026-12-13" -> "2026-12-13"
+
+
+def show_ai_markdown(text):
+    """Show an AI answer: keep its line breaks, escape "$" (not LaTeX), right-to-left when Arabic."""
+    text = re.sub(r"(?<!\n)\n(?!\n)", "  \n", text.replace("$", "\\$"))
+    if has_arabic(text):
+        st.markdown(f'<div dir="rtl">\n\n{text}\n\n</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(text)
 
 
 def plain_for_pdf(text):
@@ -575,6 +586,10 @@ def plain_for_pdf(text):
 
 def request_ai(snapshot, question, ai):
     """Send one question to whichever AI service the developer configured."""
+    if has_arabic(question):
+        # The snapshot is English, so models drift into English unless the language is stated plainly.
+        question += ("\n\n(Write the whole answer in Arabic. Keep numbers, units, dates and terms such as "
+                     "NPSH and Δp* exactly as given.)")
     if ai.get("provider") == "Gemini":
         answer = request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"])
     else:
@@ -748,7 +763,7 @@ def show_answer(state_key, snapshot_text, file_name):
         st.caption(f"{saved['mode']} · {saved['question']}")
         if saved["mode"] == AI_ONLINE:
             # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
-            st.markdown(saved["answer"].replace("$", "\\$"))
+            show_ai_markdown(saved["answer"])
         else:
             st.text(saved["answer"])
         st.caption("Calculated results are authoritative. This text does not confirm a physical fault or certify "
@@ -2137,7 +2152,7 @@ if on_tools_page:
             st.caption(f"{saved['mode']} · {saved['question']}")
             if saved["mode"] != AI_OFFLINE:
                 # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
-                st.markdown(saved["answer"].replace("$", "\\$"))
+                show_ai_markdown(saved["answer"])
             else:
                 st.text(saved["answer"])
             st.caption("Review AI wording against the calculated findings above. An explanation does not confirm a physical fault or certify pump safety.")
