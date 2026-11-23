@@ -79,9 +79,9 @@ def npsh_curve_chart(curve, margin, allowance, flow_m3h, npsha, status, height=3
     domain = list(dict.fromkeys(lines["Line"]))
     chart = alt.Chart(lines).mark_line(strokeWidth=2.5).encode(
         x=alt.X("Flow (m³/h):Q", scale=alt.Scale(domain=[curve[0][0], curve[-1][0]])),
-        y=alt.Y("Head (m):Q", scale=scale, title="Head above vapour pressure (m)"),
+        y=alt.Y("Head (m):Q", scale=scale, title="NPSH (m)"),
         color=alt.Color("Line:N", scale=alt.Scale(domain=domain, range=[RED, AMBER, GREY]),
-                        legend=alt.Legend(orient="bottom", title=None, columns=1)),
+                        legend=alt.Legend(orient="bottom", title=None, columns=1, labelLimit=0, labelFontSize=12)),
         strokeDash=alt.StrokeDash("Line:N", scale=alt.Scale(domain=domain, range=[[1, 0], [6, 4], [2, 3]]), legend=None),
     )
     layers = [chart, alt.Chart(pd.DataFrame({"q": [flow_m3h]})).mark_rule(color="#98A2B3", strokeDash=[2, 2]).encode(x="q:Q")]

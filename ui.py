@@ -38,7 +38,7 @@ h3 {{font-size: 1.15rem !important; margin-top: 0.6rem;}}
 .pd-badge.upload {{background: rgba(14,147,132,0.35); border-color: rgba(255,255,255,0.5);}}
 
 /* Status cards */
-.pd-status {{display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 4px 0 18px;}}
+.pd-status {{display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 12px; margin: 4px 0 18px;}}
 .pd-card {{background: #fff; border: 1px solid #E3E8EF; border-left: 6px solid var(--c); border-radius: 12px;
   padding: 12px 14px; box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);}}
 .pd-card-label {{font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #667085;}}
