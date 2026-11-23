@@ -473,14 +473,14 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         "generationConfig": {"maxOutputTokens": 8000, "thinkingConfig": {"thinkingLevel": "low"}},
     }
 
-    def send(model_name, body):
+    def send(model_name, body, timeout):
         request = Request(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
             method="POST",
         )
-        with urlopen(request, timeout=25) as response:
+        with urlopen(request, timeout=timeout) as response:
             return json.load(response)
 
     def google_reason(exc):
@@ -492,21 +492,25 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
 
     # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the others in turn,
-    # but stop starting new attempts after about 30 seconds so nobody waits too long.
+    # all within one time budget so nobody waits too long. Long answers (Arabic uses more tokens) need
+    # time, so a model that is merely slow gets most of the budget instead of a short fixed timeout.
+    budget = 55
     models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()]
     started = time_module.monotonic()
     try:
         for attempt, model_name in enumerate(models):
-            last = attempt == len(models) - 1 or time_module.monotonic() - started > 30
+            left = budget - (time_module.monotonic() - started)
+            last = attempt == len(models) - 1 or left < 25
             try:
                 try:
-                    result = send(model_name, payload)
+                    # The first model gets 40 s; the rest of the budget is left for one more model.
+                    result = send(model_name, payload, min(40, left) if attempt == 0 else max(10, left))
                 except HTTPError as exc:
                     if exc.code != 400 or "thinkingConfig" not in payload["generationConfig"]:
                         raise
                     # Older models do not accept thinkingLevel: retry once without it.
                     payload["generationConfig"].pop("thinkingConfig")
-                    result = send(model_name, payload)
+                    result = send(model_name, payload, max(10, budget - (time_module.monotonic() - started)))
                 break
             except HTTPError as exc:
                 if last or exc.code not in (404, 429, 500, 502, 503, 504):
@@ -743,6 +747,7 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
             st.session_state[state_key] = {"fingerprint": fingerprint, "answer": answer,
                                            "mode": ai["mode"], "question": question}
         except (RuntimeError, ValueError) as exc:
+            print(f"AI fallback ({ai.get('provider')}, {ai.get('model')}): {exc}", flush=True)  # app logs only
             if not ai["use_ai"]:
                 st.error(str(exc))
             else:
@@ -2130,7 +2135,8 @@ if on_tools_page:
                     try:
                         with st.spinner("Explaining the selected snapshot…"):
                             answer = request_ai(explanation_snapshot, question, ai)
-                    except RuntimeError:
+                    except RuntimeError as exc:
+                        print(f"AI fallback ({ai.get('provider')}, {ai.get('model')}): {exc}", flush=True)
                         answer = (offline_work_order(explanation_snapshot) if topic == MAINTENANCE_TOPIC
                                   else offline_explanation(explanation_snapshot, topic))
                         busy_note = AI_BUSY_NOTE
