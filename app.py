@@ -463,17 +463,29 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         "systemInstruction": {"parts": [{"text": AI_EXPLANATION_INSTRUCTIONS}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(
             {"snapshot": snapshot, "question": question.strip()}, ensure_ascii=False, allow_nan=False)}]}],
-        "generationConfig": {"maxOutputTokens": 8000},
+        # Gemini 3 models think at a "high" level by default, which is slow; a work order needs little reasoning.
+        "generationConfig": {"maxOutputTokens": 8000, "thinkingConfig": {"thinkingLevel": "low"}},
     }
-    request = Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model.strip()}:generateContent",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
-        method="POST",
-    )
+
+    def send(body):
+        request = Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model.strip()}:generateContent",
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=90) as response:
+            return json.load(response)
+
     try:
-        with urlopen(request, timeout=40) as response:
-            result = json.load(response)
+        try:
+            result = send(payload)
+        except HTTPError as exc:
+            if exc.code != 400:
+                raise
+            # Older models do not accept thinkingLevel: retry once without it.
+            payload["generationConfig"].pop("thinkingConfig")
+            result = send(payload)
     except HTTPError as exc:
         messages = {
             400: "The AI service rejected this request. Check the Gemini model name.",
@@ -482,8 +494,10 @@ def request_gemini_explanation(snapshot, question, api_key, model):
             429: "The free AI quota is used up for now. Try again later, or use Offline.",
         }
         raise RuntimeError(messages.get(exc.code, "The AI service could not complete the request. Try again later.")) from None
-    except (URLError, TimeoutError, OSError):
-        raise RuntimeError("Could not reach the AI service in time. Check your connection and try again.") from None
+    except TimeoutError:
+        raise RuntimeError("The AI service took too long to answer. Try again, or use Offline.") from None
+    except (URLError, OSError):
+        raise RuntimeError("Could not reach the AI service. Check your connection and try again.") from None
     except (ValueError, UnicodeError):
         raise RuntimeError("The AI service returned an unreadable response.") from None
     candidates = result.get("candidates") if isinstance(result, dict) else None
