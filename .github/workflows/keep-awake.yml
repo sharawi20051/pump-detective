@@ -1,0 +1,25 @@
+# Keeps the live demo awake during judging: Streamlit Community Cloud sleeps apps after
+# about 12 hours without visitors. Runs every 6 hours and can be started by hand from the
+# Actions tab ("Run workflow"). Disable it there once judging is over.
+name: Keep the live app awake
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"   # every 6 hours, at minute 23 (UTC)
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install a headless browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Open the app and wake it if needed
+        run: python scripts/keep_awake.py https://pump-detective.streamlit.app/
