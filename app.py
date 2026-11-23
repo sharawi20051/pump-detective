@@ -1,6 +1,7 @@
 """Interactive pump diagnostics and suction-head demonstration."""
 
 import hashlib
+import time as time_module
 import io
 import json
 import os
@@ -477,23 +478,39 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         with urlopen(request, timeout=90) as response:
             return json.load(response)
 
+    def google_reason(exc):
+        """Google's own short error text (it never contains the key), for a message the developer can act on."""
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")).get("error", {}).get("message", "")
+        except Exception:  # noqa: BLE001 - the reason is optional
+            detail = ""
+        return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
+
     try:
         try:
             result = send(payload)
         except HTTPError as exc:
-            if exc.code != 400:
+            if exc.code == 400:
+                # Older models do not accept thinkingLevel: retry once without it.
+                payload["generationConfig"].pop("thinkingConfig")
+                result = send(payload)
+            elif exc.code in (500, 502, 503, 504):
+                time_module.sleep(3)  # busy or overloaded: one more try after a short pause
+                result = send(payload)
+            else:
                 raise
-            # Older models do not accept thinkingLevel: retry once without it.
-            payload["generationConfig"].pop("thinkingConfig")
-            result = send(payload)
     except HTTPError as exc:
         messages = {
-            400: "The AI service rejected this request. Check the Gemini model name.",
+            400: "The AI service rejected this request.",
+            401: "The Gemini API key was rejected.",
             403: "The Gemini API key was rejected or lacks access.",
             404: "The selected Gemini model was not found.",
             429: "The free AI quota is used up for now. Try again later, or use Offline.",
+            500: "Google's AI service had an internal error. Try again in a minute, or use Offline.",
+            503: "Google's AI service is busy right now. Try again in a minute, or use Offline.",
         }
-        raise RuntimeError(messages.get(exc.code, "The AI service could not complete the request. Try again later.")) from None
+        raise RuntimeError(messages.get(exc.code, "The AI service could not complete the request. Try again later.")
+                           + google_reason(exc)) from None
     except TimeoutError:
         raise RuntimeError("The AI service took too long to answer. Try again, or use Offline.") from None
     except (URLError, OSError):
