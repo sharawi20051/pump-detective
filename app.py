@@ -1,7 +1,6 @@
 """Interactive pump diagnostics and suction-head demonstration."""
 
 import hashlib
-import time as time_module
 import io
 import json
 import os
@@ -468,14 +467,14 @@ def request_gemini_explanation(snapshot, question, api_key, model):
         "generationConfig": {"maxOutputTokens": 8000, "thinkingConfig": {"thinkingLevel": "low"}},
     }
 
-    def send(body):
+    def send(model_name, body):
         request = Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model.strip()}:generateContent",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
             method="POST",
         )
-        with urlopen(request, timeout=90) as response:
+        with urlopen(request, timeout=45) as response:
             return json.load(response)
 
     def google_reason(exc):
@@ -486,19 +485,28 @@ def request_gemini_explanation(snapshot, question, api_key, model):
             detail = ""
         return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
 
+    # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the other Flash model once.
+    models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()][:1]
     try:
-        try:
-            result = send(payload)
-        except HTTPError as exc:
-            if exc.code == 400:
-                # Older models do not accept thinkingLevel: retry once without it.
-                payload["generationConfig"].pop("thinkingConfig")
-                result = send(payload)
-            elif exc.code in (500, 502, 503, 504):
-                time_module.sleep(3)  # busy or overloaded: one more try after a short pause
-                result = send(payload)
-            else:
-                raise
+        for attempt, model_name in enumerate(models):
+            last = attempt == len(models) - 1
+            try:
+                try:
+                    result = send(model_name, payload)
+                except HTTPError as exc:
+                    if exc.code != 400 or "thinkingConfig" not in payload["generationConfig"]:
+                        raise
+                    # Older models do not accept thinkingLevel: retry once without it.
+                    payload["generationConfig"].pop("thinkingConfig")
+                    result = send(model_name, payload)
+                break
+            except HTTPError as exc:
+                if last or exc.code not in (404, 429, 500, 502, 503, 504):
+                    raise
+            except (TimeoutError, URLError) as exc:
+                timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+                if last or not timed_out:
+                    raise
     except HTTPError as exc:
         messages = {
             400: "The AI service rejected this request.",
@@ -513,7 +521,11 @@ def request_gemini_explanation(snapshot, question, api_key, model):
                            + google_reason(exc)) from None
     except TimeoutError:
         raise RuntimeError("The AI service took too long to answer. Try again, or use Offline.") from None
-    except (URLError, OSError):
+    except URLError as exc:
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise RuntimeError("The AI service took too long to answer. Try again, or use Offline.") from None
+        raise RuntimeError("Could not reach the AI service. Check your connection and try again.") from None
+    except OSError:
         raise RuntimeError("Could not reach the AI service. Check your connection and try again.") from None
     except (ValueError, UnicodeError):
         raise RuntimeError("The AI service returned an unreadable response.") from None
@@ -831,13 +843,15 @@ def server_setting(name, default=""):
     return str(value or os.environ.get(name, default)).strip()
 
 
+# Gemini models tried in order when the configured one is busy: the lighter Flash-Lite answers fastest on the free tier.
+GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-flash-latest")
 # The developer sets one key in .streamlit/secrets.toml (or the host's secrets). OpenAI is used when its key is
 # present; otherwise Google Gemini (which has a free tier); otherwise the offline writer only.
 OPENAI_KEY, GEMINI_KEY = server_setting("OPENAI_API_KEY"), server_setting("GEMINI_API_KEY")
 if OPENAI_KEY:
     AI_PROVIDER, AI_KEY, AI_MODEL = "OpenAI", OPENAI_KEY, server_setting("OPENAI_MODEL", "gpt-6-luna")
 elif GEMINI_KEY:
-    AI_PROVIDER, AI_KEY, AI_MODEL = "Gemini", GEMINI_KEY, server_setting("GEMINI_MODEL", "gemini-flash-latest")
+    AI_PROVIDER, AI_KEY, AI_MODEL = "Gemini", GEMINI_KEY, server_setting("GEMINI_MODEL", GEMINI_FALLBACK_MODELS[0])
 else:
     AI_PROVIDER, AI_KEY, AI_MODEL = None, "", ""
 AI_ONLINE = f"AI · {AI_PROVIDER}" if AI_PROVIDER else "AI"
