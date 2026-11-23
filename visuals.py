@@ -101,7 +101,7 @@ def npsh_curve_chart(curve, margin, allowance, flow_m3h, npsha, status, height=3
 def options_chart(options, npshr, target, height=220):
     """Horizontal bars: NPSHa for each repair option, with NPSHr and the target as lines."""
     df = pd.DataFrame(options, columns=["Option", "NPSHa (m)", "Status"])
-    scale = alt.Scale(domain=[0, max(df["NPSHa (m)"].max(), target) * 1.15])
+    scale = alt.Scale(domain=[0, max(df["NPSHa (m)"].max(), target) * 1.6])  # room for the value labels
     bars = alt.Chart(df).mark_bar(cornerRadiusEnd=6, height=26).encode(
         y=alt.Y("Option:N", sort=None, title=None, axis=alt.Axis(labelLimit=260, labelFontSize=12)),
         x=alt.X("NPSHa (m):Q", scale=scale, title="NPSH available (m)"),

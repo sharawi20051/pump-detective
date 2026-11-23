@@ -33,12 +33,6 @@ from pump_detective import (
 )
 
 
-# (pressure before filter, pressure after filter), both kPa abs.
-SCENARIOS = {
-    "Case A · Low downstream pressure": (110.0, 85.0),
-    "Case B · Low downstream pressure": (90.0, 85.0),
-    "Clean strainer · Reference case": (110.0, 105.0),
-}
 
 
 NPSH_TOOLTIP = ("NPSH = pressure head at the pump inlet above the point where water boils. Below the pump's NPSHr "
@@ -247,7 +241,8 @@ def forecast_findings(summary):
             "Keep trending. This does not establish overall pump health.")
 
     if summary["suction_now_kpa_abs"] < ATMOSPHERIC_KPA_ABS:
-        add(1, "Suction below atmospheric pressure",
+        add(1 if summary["npsh_status_now"] in ("WARNING", "CRITICAL") else 2,
+            "Note: suction below atmospheric pressure",
             f"Estimated suction {summary['suction_now_kpa_abs']:.2f} kPa abs at design flow.",
             "In a closed chilled-water loop, check fill pressure and the expansion tank; sub-atmospheric sections can draw in air.")
     for event in summary["events"]:
@@ -261,7 +256,7 @@ def forecast_findings(summary):
             "Check the suction pressure transmitter, impulse line and wiring.")
     ver = summary.get("post_maintenance_verification")
     if ver:
-        priority = {"RESTORED": 3, "IMPROVED, NOT CLEAN": 2}.get(ver["strainer_verdict"], 0)
+        priority = {"RESTORED": 0, "IMPROVED, NOT CLEAN": 1}.get(ver["strainer_verdict"], 0)
         add(priority, f"Maintenance check · strainer {ver['strainer_verdict']}",
             f"{ver['message']} Measured {ver['measured_dp_kpa']:g} kPa at {ver['measured_flow_lps']:g} L/s "
             f"({ver['instrument_method']}). NPSH after cleaning: {ver['npsh_status_after']}.",
@@ -460,6 +455,56 @@ def request_ai_explanation(snapshot, question, api_key, model):
     return answer
 
 
+def request_gemini_explanation(snapshot, question, api_key, model):
+    """One bounded Gemini generateContent request (works on Google's free tier). No keys in errors."""
+    if not api_key.strip() or not model.strip() or not question.strip():
+        raise ValueError("An API key, model and question are required.")
+    payload = {
+        "systemInstruction": {"parts": [{"text": AI_EXPLANATION_INSTRUCTIONS}]},
+        "contents": [{"role": "user", "parts": [{"text": json.dumps(
+            {"snapshot": snapshot, "question": question.strip()}, ensure_ascii=False, allow_nan=False)}]}],
+        "generationConfig": {"maxOutputTokens": 8000},
+    }
+    request = Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model.strip()}:generateContent",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"x-goog-api-key": api_key.strip(), "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=40) as response:
+            result = json.load(response)
+    except HTTPError as exc:
+        messages = {
+            400: "The AI service rejected this request. Check the Gemini model name.",
+            403: "The Gemini API key was rejected or lacks access.",
+            404: "The selected Gemini model was not found.",
+            429: "The free AI quota is used up for now. Try again later, or use Offline.",
+        }
+        raise RuntimeError(messages.get(exc.code, "The AI service could not complete the request. Try again later.")) from None
+    except (URLError, TimeoutError, OSError):
+        raise RuntimeError("Could not reach the AI service in time. Check your connection and try again.") from None
+    except (ValueError, UnicodeError):
+        raise RuntimeError("The AI service returned an unreadable response.") from None
+    candidates = result.get("candidates") if isinstance(result, dict) else None
+    if not candidates or not isinstance(candidates[0], dict):
+        raise RuntimeError("The AI service returned no explanation. The calculated results remain available.")
+    if candidates[0].get("finishReason") == "MAX_TOKENS":
+        raise RuntimeError("The AI answer hit the output-length limit. Ask a narrower question, or use Offline.")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    answer = "\n".join(p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)).strip()
+    if not answer:
+        raise RuntimeError("The AI service returned no explanation. The calculated results remain available.")
+    return answer
+
+
+def request_ai(snapshot, question, ai):
+    """Send one question to whichever AI service the developer configured."""
+    if ai.get("provider") == "Gemini":
+        return request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"])
+    return request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
+
+
 def offline_explanation(snapshot, topic):
     """A clearly labeled deterministic alternative when no AI key is configured."""
     rows = snapshot["findings"]
@@ -513,10 +558,6 @@ def invalidate_secondary_references(flow_changed=False, speed_changed=False):
         st.session_state.intel_min_known = False
 
 
-def hide_upstream_reading():
-    st.session_state.show_upstream = False
-
-
 def reset_repair_demo():
     st.session_state.repair_reading_visible = False
     st.session_state.simulate_cleaning = False
@@ -561,6 +602,10 @@ def forecast_status_cards(summary):
                       "The latest days were hidden, the same method forecast them, and the result was compared with "
                       "what the sensors showed. See the Forecast check tab."))
     ver = summary.get("post_maintenance_verification")
+    if ver and ver["strainer_verdict"] == "RESTORED":
+        cards[1] = ("Next action", "DONE", "Cleaning verified · keep trending", "SAFE",
+                    "The strainer reading after cleaning is within the clean band.")
+        cards[2] = ("Complete by", "—", "the forecast restarts from new readings", "NONE")
     if ver:
         cards.append(("Last maintenance check", ver["strainer_verdict"],
                       f"Δp* {ver['normalised_dp_after_kpa']:.2f} kPa after cleaning", ver["strainer_verdict"]))
@@ -570,7 +615,7 @@ def forecast_status_cards(summary):
 def generate_answer(snapshot, question, topic, ai):
     """Work order or explanation: OpenAI when selected, otherwise the deterministic offline writer."""
     if ai["use_ai"]:
-        return request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
+        return request_ai(snapshot, question, ai)
     if topic == MAINTENANCE_TOPIC:
         return offline_work_order(snapshot)
     return offline_explanation(snapshot, topic)
@@ -582,7 +627,12 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
     Returns the snapshot as JSON text (used for downloads).
     """
     snapshot_text = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, allow_nan=False)
-    fingerprint = hashlib.sha256((snapshot_text + ai["mode"] + ai["model"] + question).encode("utf-8")).hexdigest()
+    # Recording a cleaning must not wipe the work order written before it, so the verification is left out here.
+    basis = {k: v for k, v in snapshot.items() if k != "findings"}
+    if isinstance(basis.get("forecast"), dict):
+        basis["forecast"] = {k: v for k, v in basis["forecast"].items() if k != "post_maintenance_verification"}
+    basis_text = json.dumps(basis, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    fingerprint = hashlib.sha256((basis_text + ai["mode"] + ai["model"] + question).encode("utf-8")).hexdigest()
     saved = st.session_state.get(state_key)
     if saved and saved["fingerprint"] != fingerprint:
         st.session_state.pop(state_key, None)
@@ -613,7 +663,7 @@ def show_answer(state_key, snapshot_text, file_name):
         return
     with st.container(border=True):
         st.caption(f"{saved['mode']} · {saved['question']}")
-        if saved["mode"] == AI_OPENAI:
+        if saved["mode"] == AI_ONLINE:
             # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
             st.markdown(saved["answer"].replace("$", "\\$"))
         else:
@@ -737,7 +787,7 @@ def verify_dialog(context):
 
 
 FORECAST_PAGE, TOOLS_PAGE = "📈 Strainer forecast", "🧰 Engineering tools"
-AI_OFFLINE, AI_OPENAI = "Offline · rule-based", "AI · OpenAI"
+AI_OFFLINE = "Offline · rule-based"
 
 
 def server_setting(name, default=""):
@@ -750,8 +800,16 @@ def server_setting(name, default=""):
     return str(value or os.environ.get(name, default)).strip()
 
 
-AI_KEY = server_setting("OPENAI_API_KEY")
-AI_MODEL = server_setting("OPENAI_MODEL", "gpt-6-luna")
+# The developer sets one key in .streamlit/secrets.toml (or the host's secrets). OpenAI is used when its key is
+# present; otherwise Google Gemini (which has a free tier); otherwise the offline writer only.
+OPENAI_KEY, GEMINI_KEY = server_setting("OPENAI_API_KEY"), server_setting("GEMINI_API_KEY")
+if OPENAI_KEY:
+    AI_PROVIDER, AI_KEY, AI_MODEL = "OpenAI", OPENAI_KEY, server_setting("OPENAI_MODEL", "gpt-6-luna")
+elif GEMINI_KEY:
+    AI_PROVIDER, AI_KEY, AI_MODEL = "Gemini", GEMINI_KEY, server_setting("GEMINI_MODEL", "gemini-flash-latest")
+else:
+    AI_PROVIDER, AI_KEY, AI_MODEL = None, "", ""
+AI_ONLINE = f"AI · {AI_PROVIDER}" if AI_PROVIDER else "AI"
 
 st.set_page_config(page_title="Pump Detective", page_icon="🔍", layout="wide")
 ui.apply_style()
@@ -772,77 +830,26 @@ with st.sidebar:
         )
         if AI_KEY:
             ai_mode = st.radio(
-                "Write work orders with", (AI_OPENAI, AI_OFFLINE), key="explain_mode",
+                "Write work orders with", (AI_ONLINE, AI_OFFLINE), key="explain_mode",
                 help="AI writes the work order as natural text; Offline builds it instantly from the rules. Either "
                      "way, Python sets every number, date and priority.",
             )
         else:
             ai_mode = AI_OFFLINE
-ai = {"mode": ai_mode, "use_ai": ai_mode == AI_OPENAI, "api_key": AI_KEY, "model": AI_MODEL}
+ai = {"mode": ai_mode, "use_ai": ai_mode == AI_ONLINE, "api_key": AI_KEY, "model": AI_MODEL, "provider": AI_PROVIDER}
 
 if on_tools_page:
     with page_top:
         ui.header("SYNTHETIC", "Engineering tools · simulated pressures")
-    ui.tool_cards([
-        ("🔧", "Repair simulation", "Which fix restores suction?"),
-        ("🔍", "Strainer diagnostics", "Strainer or upstream?"),
-        ("🛡️", "Cavitation Shield", "Will the pump cavitate?"),
-        ("⚙️", "Part-load / VFD", "Safe at part load?"),
-        ("🧠", "Findings & explanation", "Evidence, next checks, AI"),
-    ])
-    repair, diagnostics, cavitation, part_load, tool_findings = st.tabs(
-        ["🔧 Repair simulation", "🔍 Strainer diagnostics", "🛡️ Cavitation Shield", "⚙️ Part-load / VFD",
+    ui.note("Four tools, each answering one question. <b>🔧 Repair simulation:</b> is it the strainer or the system, "
+            "and which fix works? <b>🛡️ Cavitation Shield:</b> will the pump cavitate? <b>⚙️ Part-load / VFD:</b> "
+            "is a slowed-down pump safe? <b>🧠 Findings:</b> the evidence and the next checks.", "tools-intro")
+    repair, cavitation, part_load, tool_findings = st.tabs(
+        ["🔧 Repair simulation", "🛡️ Cavitation Shield", "⚙️ Part-load / VFD",
          "🧠 Findings & explanation"]
     )
 
 if on_tools_page:
-    with diagnostics:
-        ui.section(None, "Strainer diagnostics", "Is the strainer blocked, or is the problem upstream?",
-                   "A reading after the strainer alone cannot tell. Reveal the reading before it: the drop across "
-                   "the strainer answers the question.", first=True)
-        d_in, d_out = st.columns([1, 2], gap="large")
-        with d_in:
-            with st.container(border=True):
-                st.markdown("**Inputs**")
-                scenario = st.selectbox("Test case", SCENARIOS, on_change=hide_upstream_reading)
-                upstream, downstream = SCENARIOS[scenario]
-                show_upstream = st.toggle("Reveal the pressure before the strainer", key="show_upstream")
-                st.caption(f"Simulated absolute pressures at the fixed design flow of {DESIGN_FLOW_LPS:g} L/s. "
-                           f"Normal suction for this plant: {NORMAL_SUCTION_KPA_ABS:g} kPa abs.")
-        measured_upstream = upstream if show_upstream else None
-        pressure_drop, suggestion = diagnose_filter(measured_upstream, downstream)
-        d_verdict = strainer_verdict(measured_upstream, downstream)
-        with d_out:
-            d_cards = [
-                ("Before the strainer", "Hidden" if measured_upstream is None else f"{measured_upstream:g} kPa abs",
-                 "reveal it to diagnose" if measured_upstream is None else "measured", 
-                 "NOT ASSESSED" if measured_upstream is None else "PLANNED"),
-                ("Pressure drop", "—" if pressure_drop is None else f"{pressure_drop:g} kPa",
-                 f"clean reference {CLEAN_FILTER_DROP_KPA:g} ± {TOLERANCE_KPA:g} kPa", VERDICT_KEY[d_verdict]),
-                ("Verdict", VERDICT_TEXT[d_verdict], "from the strainer pressure drop", VERDICT_KEY[d_verdict]),
-            ]
-            ui.status_cards(d_cards)
-            st.markdown(visuals.suction_line_svg(measured_upstream, downstream, pressure_drop, d_verdict),
-                        unsafe_allow_html=True)
-            verdict_alert(d_verdict, suggestion)
-        with st.expander("Assumptions"):
-            st.caption("Both readings are absolute pressures taken at the same flow. The 5 kPa clean drop and ±2 kPa "
-                       "tolerance are demonstration values, not field alarm thresholds.")
-        tool_download(
-            "Strainer diagnostics", "Is the strainer blocked, or is the problem upstream?",
-            f"Test case: {scenario} · simulated absolute pressures at {DESIGN_FLOW_LPS:g} L/s", d_cards,
-            [("Readings", [["Reading", "Value"],
-                           ["Before the strainer", "Hidden (not yet measured)" if measured_upstream is None
-                            else f"{measured_upstream:g} kPa abs"],
-                           ["After the strainer (pump suction)", f"{downstream:g} kPa abs"],
-                           ["Pressure drop", "—" if pressure_drop is None else f"{pressure_drop:g} kPa"],
-                           ["Clean-strainer reference", f"{CLEAN_FILTER_DROP_KPA:g} ± {TOLERANCE_KPA:g} kPa"],
-                           ["Normal suction for this plant", f"{NORMAL_SUCTION_KPA_ABS:g} kPa abs"]]),
-             ("Suggested check", suggestion)],
-            "pump_detective_strainer_diagnostics.pdf", "dl_diag",
-        )
-
-
     with cavitation:
         ui.section(None, "Cavitation Shield", "Will the pump cavitate at this operating point?",
                    "Move the flow and suction pressure. The dot shows what the system supplies against what the pump "
@@ -1182,7 +1189,7 @@ if not on_tools_page:
 
     # --- Forecast table ----------------------------------------------------------
     fc_limits = [
-        ("Maintenance Δp limit", fc_maint_limit),
+        ("Cleaning Δp limit", fc_maint_limit),
         (f"NPSH WARNING (margin {engineer_margin:.2f} m lost)", fc_warn_dp),
         ("NPSH CRITICAL (NPSHa = NPSHr)", fc_crit_dp),
     ]
@@ -1220,7 +1227,20 @@ if not on_tools_page:
             for row in fc_limit_rows
         ])
 
+    fc_ver_state = st.session_state.get("verification")
+    fc_cleaned = bool(fc_ver_state and fc_ver_state["result"].verdict == "RESTORED" and (
+        fc_ver_state["scenario"], fc_ver_state["upstream"], fc_ver_state.get("maint_limit")) == (
+        fc_scenario, fc_upstream, fc_maint_limit))
+
+    def fc_say(show, text):
+        """Show the pre-cleaning recommendation, unless a cleaning has just been verified."""
+        if not fc_cleaned:
+            show(text)
+
     with p_alert:
+        if fc_cleaned:
+            st.success("✓ **Cleaning verified: strainer restored.** The dates below come from the readings before "
+                       "the cleaning; the forecast restarts as new readings arrive. Keep trending.")
         # Recommendation: the earliest (fast-rate) crossing of the maintenance limit or NPSH WARNING.
         fc_candidates = [(row["days_earliest"], row["threshold"]) for row, (_, limit) in zip(fc_limit_rows[:2], fc_limits[:2])
                          if limit > 0 and row["days_earliest"] is not None]
@@ -1237,9 +1257,9 @@ if not on_tools_page:
                 "cleaning_alone_restores_npsh_margin": fc_restores,
             }
             if fc_first_days == 0:
-                st.error(f"Clean the strainer now: {fc_first_name.split(' (')[0]} has already been reached.")
+                fc_say(st.error, f"Clean the strainer now: {fc_first_name.split(' (')[0]} has already been reached.")
             else:
-                st.warning(
+                fc_say(st.warning, 
                     f"Schedule strainer cleaning before **{fc_due:%A %d %B %Y}** "
                     f"(about {fc_first_days:.0f} days, earliest estimate). Driver: {fc_first_name}."
                     + ("" if fc_restores else " Cleaning alone will not restore the NPSH margin at this upstream pressure.")
@@ -1248,7 +1268,7 @@ if not on_tools_page:
             fc_reco = {"action": "No strainer cleaning forecast within 180 days; keep trending",
                        "priority": "NONE", "complete_by": None, "days_until_due_earliest": None,
                        "driver": None, "cleaning_alone_restores_npsh_margin": fc_restores}
-            st.success("No maintenance or NPSH threshold is forecast within 180 days at the current fouling rate.")
+            fc_say(st.success, "No maintenance or NPSH threshold is forecast within 180 days at the current fouling rate.")
         if not fc_restores:
             # The strainer is not the limiting factor: restoring system pressure comes first.
             fc_reco = {
@@ -1281,11 +1301,14 @@ if not on_tools_page:
         })
         fc_rules = pd.DataFrame({
             "limit": [fc_maint_limit, fc_warn_dp, fc_crit_dp],
-            "Threshold": ["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
+            "Threshold": ["Cleaning limit", "NPSH WARNING", "NPSH CRITICAL"],
         })
-        fc_rules = fc_rules[fc_rules["limit"] > 0]
-        fc_ymax = float(max(fc_proj["high"].max(), np.nanmax(fc_log["dp_kpa"]), *fc_rules["limit"], 10)) * 1.08
-        fc_ymax = min(fc_ymax, 3 * max(fc_rules["limit"].max(), fc_fit.current_kpa))
+        fc_data_top = float(max(np.nanmax(fc_daily), fc_proj["fit"].max()))
+        # The cleaning limit is always drawn; an NPSH line far above the data is named instead of drawn.
+        fc_is_far = (fc_rules["Threshold"] != "Cleaning limit") & (fc_rules["limit"] > 2.5 * max(fc_data_top, fc_maint_limit))
+        fc_far = fc_rules[fc_is_far]
+        fc_rules = fc_rules[(fc_rules["limit"] > 0) & ~fc_is_far]
+        fc_ymax = float(max([fc_data_top, 10, *fc_rules["limit"]])) * 1.12
         y_scale = alt.Scale(domain=[0, fc_ymax], clamp=True)
 
         raw_layer = alt.Chart(fc_hourly).mark_circle(size=6, opacity=0.18, color="#8a8f98").encode(
@@ -1306,7 +1329,7 @@ if not on_tools_page:
         rule_layer = alt.Chart(fc_rules).mark_rule(strokeWidth=1.5).encode(
             y=alt.Y("limit:Q", scale=y_scale),
             color=alt.Color("Threshold:N", scale=alt.Scale(
-                domain=["Maintenance limit", "NPSH WARNING", "NPSH CRITICAL"],
+                domain=["Cleaning limit", "NPSH WARNING", "NPSH CRITICAL"],
                 range=["#6b7280", "#d4a017", "#c62828"]), legend=alt.Legend(orient="bottom", title=None, columns=2)),  # wraps on phones
             tooltip=["Threshold", alt.Tooltip("limit:Q", format=".1f")],
         )
@@ -1324,6 +1347,10 @@ if not on_tools_page:
             "Δp·(Q_ref/Q)². Orange: exponential trend with its 95% statistical range. Red crosses: readings flagged as "
             "anomalies and excluded. The dotted vertical line is today."
         )
+        if len(fc_far):
+            st.info(" and ".join(f"{name} ({limit:.0f} kPa)" for name, limit in zip(fc_far["Threshold"], fc_far["limit"]))
+                    + " lie far above this range at this pressure, so they are not drawn: here the strainer would need "
+                      "to clog far beyond its cleaning limit before it threatened the pump.")
 
     with tab_events:
         # --- Anomalies -----------------------------------------------------------------
@@ -1355,7 +1382,8 @@ if not on_tools_page:
             st.write("No anomalies detected.")
         st.caption(
             f"Trend fitted on {fc_fit.days_used} daily medians from {fc_day_to_date(fc_fit.start_day):%d %b} "
-            "(after the most recent step change, at most 21 days)."
+            + (f"(after the step change on {fc_day_to_date(max(fc_steps)):%d %b})." if fc_steps
+               else "(the most recent 21 days at most).")
         )
 
     with tab_check:
@@ -1585,7 +1613,8 @@ if not on_tools_page:
     with page_top:
         ui.header(forecast_summary["data_label"], fc_scenario)
         ui.status_cards(forecast_status_cards(forecast_summary))
-        ui.note("<b>How to use:</b> ① choose the data in the sidebar ② read the recommendation below "
+        ui.note("<b>How to use:</b> ① choose the data in the sidebar (on a phone, tap » at the top left) "
+                "② read the recommendation below "
                 "③ create the work order, or record the result after a cleaning. Details are in the tabs under the chart.",
                 "guide")
 
@@ -1593,7 +1622,8 @@ if not on_tools_page:
         fc_snapshot = forecast_snapshot(forecast_summary, engineer_margin)
         b1, b2, b3 = st.columns(3)
         fc_snapshot_text = answer_button(fc_snapshot, MAINTENANCE_TOPIC, MAINTENANCE_TOPIC, ai, "work_order",
-                                         "📋 Create work order", slot=b1, primary=True)
+                                         "📋 Create work order" if forecast_summary["recommendation"]["priority"] != "NONE"
+                                         else "📋 Create inspection note", slot=b1, primary=True)
         if b2.button("🧹 Record cleaning result", key="verify_open", width="stretch",
                      help="After maintenance: enter one Δp reading and the flow to check whether the cleaning worked."):
             verify_dialog({"scenario": fc_scenario, "upstream": fc_upstream, "maint_limit": fc_maint_limit,
@@ -1621,16 +1651,17 @@ if not on_tools_page:
                 st.markdown(f"**{item['Finding']}**  \n{item['Evidence']}  \n*Next check:* {item['Next check']}")
             st.caption("Findings are ordered by urgency of the check, not by probability of a fault. No overall "
                        "SAFE verdict is issued; the 0.50 m catalogue allowance is not added to the margin.")
-        with st.expander("💬 Ask about this forecast"):
-            ask_topic = st.selectbox(
-                "Question", ("Explain the current diagnosis", "Why is there NPSH risk?",
-                             "Would cleaning the strainer help?", "Which data are missing?"), key="ask_topic")
-            ask_custom = ""
-            if ai["use_ai"]:
-                ask_custom = st.text_area("Or ask your own question (Arabic or English)", max_chars=1200,
-                                          key="ask_custom").strip()
-            ask_text = answer_button(fc_snapshot, ask_custom or ask_topic, ask_topic, ai, "ask_answer", "Ask")
-            show_answer("ask_answer", ask_text, "pump_detective_answer.pdf")
+        if ai["use_ai"]:  # offline, the answers would only repeat "Why?" above
+            with st.expander("💬 Ask about this forecast"):
+                ask_topic = st.selectbox(
+                    "Question", ("Explain the current diagnosis", "Why is there NPSH risk?",
+                                 "Would cleaning the strainer help?", "Which data are missing?"), key="ask_topic")
+                ask_custom = ""
+                if ai["use_ai"]:
+                    ask_custom = st.text_area("Or ask your own question (Arabic or English)", max_chars=1200,
+                                              key="ask_custom").strip()
+                ask_text = answer_button(fc_snapshot, ask_custom or ask_topic, ask_topic, ai, "ask_answer", "Ask")
+                show_answer("ask_answer", ask_text, "pump_detective_answer.pdf")
 
 
 if on_tools_page:
@@ -1874,11 +1905,18 @@ if on_tools_page:
         if snapshot_problem:
             # An unusable suction reading must not produce an NPSH margin anywhere downstream.
             snapshot_r = None
-        a_col, r_col, drop_col = st.columns(3)
-        a_col.metric("Snapshot NPSHa", "Not assessed" if snapshot_problem else f"{snapshot_a:.2f} m")
-        r_col.metric("Snapshot NPSHr", "Missing" if snapshot_r is None else f"{snapshot_r:.2f} m")
-        drop_col.metric("Strainer Δp* now (normalised)" if is_forecast else "Snapshot strainer Δp",
-                        "Missing" if snapshot_drop is None else f"{snapshot_drop:.2f} kPa")
+        snap_status = ("NOT ASSESSED" if snapshot_problem or snapshot_r is None or snapshot_q == 0
+                       else npsh_assessment(snapshot_a, snapshot_r, engineer_margin)[2])
+        ui.status_cards([
+            ("NPSH status", snap_status, "for this snapshot", snap_status, NPSH_TOOLTIP),
+            ("NPSH available", "Not assessed" if snapshot_problem else f"{snapshot_a:.2f} m", "what the system supplies",
+             "PLANNED"),
+            ("NPSH required", "Missing" if snapshot_r is None else f"{snapshot_r:.2f} m", "from the pump curve",
+             "NOT ASSESSED" if snapshot_r is None else "PLANNED"),
+            ("Strainer Δp", "Missing" if snapshot_drop is None else f"{snapshot_drop:.2f} kPa",
+             "reveal it in Repair simulation" if snapshot_drop is None else "measured across the strainer",
+             "NOT ASSESSED" if snapshot_drop is None else "PLANNED"),
+        ])
         if is_forecast:
             reco = forecast_summary["recommendation"]
             reco_text = (f"**Predictive maintenance · {reco['priority']}** — {reco['action']}"
@@ -1984,7 +2022,7 @@ if on_tools_page:
             try:
                 if use_ai:
                     with st.spinner("Explaining the selected snapshot…"):
-                        answer = request_ai_explanation(explanation_snapshot, question, api_key, model)
+                        answer = request_ai(explanation_snapshot, question, ai)
                 elif topic == MAINTENANCE_TOPIC:
                     answer = offline_work_order(explanation_snapshot)
                 else:
@@ -1999,7 +2037,7 @@ if on_tools_page:
         saved = st.session_state.get("explain_result")
         if saved and saved["fingerprint"] == fingerprint:
             st.caption(f"{saved['mode']} · {saved['question']}")
-            if saved["mode"].startswith("OpenAI"):
+            if saved["mode"] != AI_OFFLINE:
                 # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
                 st.markdown(saved["answer"].replace("$", "\\$"))
             else:
