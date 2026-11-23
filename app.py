@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import time as time_module
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -385,6 +387,9 @@ the measurement uncertainty of the clean baseline, not that the pump or system i
 SUSPICIOUSLY LOW must be reported as a possible damaged screen, bypass or sensor problem.
 If forecast.backtest is present, use its figures in Confidence exactly as given; it scores the
 method on the same log, not general field performance.
+Write for a maintenance technician. Use the symbols Δp*, ±, ° and % as plain text; never LaTeX
+or $ math notation. Never mention internal field names (words joined by underscores); say what
+they mean instead.
 """
 
 
@@ -485,11 +490,13 @@ def request_gemini_explanation(snapshot, question, api_key, model):
             detail = ""
         return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
 
-    # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the other Flash model once.
-    models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()][:1]
+    # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the others in turn,
+    # but stop starting new attempts after about 50 seconds so nobody waits too long.
+    models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()]
+    started = time_module.monotonic()
     try:
         for attempt, model_name in enumerate(models):
-            last = attempt == len(models) - 1
+            last = attempt == len(models) - 1 or time_module.monotonic() - started > 50
             try:
                 try:
                     result = send(model_name, payload)
@@ -541,11 +548,38 @@ def request_gemini_explanation(snapshot, question, api_key, model):
     return answer
 
 
+LATEX_SYMBOLS = {"\\Delta": "Δ", "\\pm": "±", "\\times": "×", "\\approx": "≈", "\\cdot": "·", "\\%": "%",
+                 "\\geq": "≥", "\\leq": "≤", "\\degree": "°", "\\circ": "°"}
+
+
+def tidy_ai_text(text):
+    """Turn stray LaTeX such as $\\Delta p^*$ into plain symbols (Δp*). Dollar amounts are left alone."""
+    def plain(match):
+        math = match.group(1)
+        for code, symbol in LATEX_SYMBOLS.items():
+            math = math.replace(code, symbol)
+        math = re.sub(r"\\[A-Za-z]+", "", math).replace("^", "").replace("{", "").replace("}", "")
+        return re.sub(r"Δ\s+", "Δ", math).strip()
+    return re.sub(r"\$([^$\n]*\\[^$\n]*)\$", plain, text)
+
+
+def plain_for_pdf(text):
+    """Markdown from an AI answer as plain lines for the PDF: no ** or backticks, bullets as •."""
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*[*-]\s+", "• ", line)
+        line = re.sub(r"^#+\s*", "", line)
+        lines.append(line.replace("**", "").replace("__", "").replace("`", ""))
+    return "\n".join(lines)
+
+
 def request_ai(snapshot, question, ai):
     """Send one question to whichever AI service the developer configured."""
     if ai.get("provider") == "Gemini":
-        return request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"])
-    return request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
+        answer = request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"])
+    else:
+        answer = request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
+    return tidy_ai_text(answer)
 
 
 def offline_explanation(snapshot, topic):
@@ -694,9 +728,13 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
             st.session_state[state_key] = {"fingerprint": fingerprint, "answer": answer,
                                            "mode": ai["mode"], "question": question}
         except (RuntimeError, ValueError) as exc:
-            st.error(str(exc))
-            st.info("Your calculated results are unchanged. Switch to Offline in Settings while the AI connection "
-                    "is unavailable.")
+            if not ai["use_ai"]:
+                st.error(str(exc))
+            else:
+                # Never leave the user without an answer: the rule-based writer uses the same calculations.
+                offline = generate_answer(snapshot, question, topic, {**ai, "use_ai": False})
+                st.session_state[state_key] = {"fingerprint": fingerprint, "answer": offline, "mode": AI_OFFLINE,
+                                               "question": question, "note": f"{AI_BUSY_NOTE} ({exc})"}
     return snapshot_text
 
 
@@ -705,6 +743,8 @@ def show_answer(state_key, snapshot_text, file_name):
     if not saved:
         return
     with st.container(border=True):
+        if saved.get("note"):
+            st.info(saved["note"])
         st.caption(f"{saved['mode']} · {saved['question']}")
         if saved["mode"] == AI_ONLINE:
             # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
@@ -716,7 +756,7 @@ def show_answer(state_key, snapshot_text, file_name):
         title = "Maintenance work order" if state_key == "work_order" else "Pump Detective answer"
         st.download_button(
             "⬇ Download PDF", data=reports.text_pdf(
-                title, f"{saved['mode']} · question: {saved['question']}", saved["answer"],
+                title, f"{saved['mode']} · question: {saved['question']}", plain_for_pdf(saved["answer"]),
                 note="Calculated results are authoritative. This text does not confirm a physical fault or certify "
                      "pump safety."),
             file_name=file_name, mime="application/pdf", key=f"{state_key}_download",
@@ -844,7 +884,9 @@ def server_setting(name, default=""):
 
 
 # Gemini models tried in order when the configured one is busy: the lighter Flash-Lite answers fastest on the free tier.
-GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-flash-latest")
+GEMINI_FALLBACK_MODELS = ("gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash")
+AI_BUSY_NOTE = ("The AI service is busy right now, so this is the rule-based version, built from the same "
+                "calculations. Try the button again in a minute for the AI-written text.")
 # The developer sets one key in .streamlit/secrets.toml (or the host's secrets). OpenAI is used when its key is
 # present; otherwise Google Gemini (which has a free tier); otherwise the offline writer only.
 OPENAI_KEY, GEMINI_KEY = server_setting("OPENAI_API_KEY"), server_setting("GEMINI_API_KEY")
@@ -2065,22 +2107,30 @@ if on_tools_page:
             # Remove the previous answer first, including when a new request fails.
             st.session_state.pop("explain_result", None)
             try:
+                busy_note = None
                 if use_ai:
-                    with st.spinner("Explaining the selected snapshot…"):
-                        answer = request_ai(explanation_snapshot, question, ai)
+                    try:
+                        with st.spinner("Explaining the selected snapshot…"):
+                            answer = request_ai(explanation_snapshot, question, ai)
+                    except RuntimeError as exc:
+                        answer = (offline_work_order(explanation_snapshot) if topic == MAINTENANCE_TOPIC
+                                  else offline_explanation(explanation_snapshot, topic))
+                        busy_note = f"{AI_BUSY_NOTE} ({exc})"
                 elif topic == MAINTENANCE_TOPIC:
                     answer = offline_work_order(explanation_snapshot)
                 else:
                     answer = offline_explanation(explanation_snapshot, topic)
                 st.session_state["explain_result"] = {
                     "fingerprint": fingerprint, "answer": answer,
-                    "mode": mode, "question": question,
+                    "mode": AI_OFFLINE if busy_note else mode, "question": question, "note": busy_note,
                 }
             except (RuntimeError, ValueError) as exc:
                 st.error(str(exc))
                 st.info("Your calculated diagnosis is unchanged. You can use Offline while the AI connection is unavailable.")
         saved = st.session_state.get("explain_result")
         if saved and saved["fingerprint"] == fingerprint:
+            if saved.get("note"):
+                st.info(saved["note"])
             st.caption(f"{saved['mode']} · {saved['question']}")
             if saved["mode"] != AI_OFFLINE:
                 # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
@@ -2090,7 +2140,7 @@ if on_tools_page:
             st.caption("Review AI wording against the calculated findings above. An explanation does not confirm a physical fault or certify pump safety.")
             st.download_button(
                 "⬇ Download explanation (PDF)",
-                data=reports.text_pdf("Explanation", f"{saved['mode']} · question: {saved['question']}", saved["answer"],
+                data=reports.text_pdf("Explanation", f"{saved['mode']} · question: {saved['question']}", plain_for_pdf(saved["answer"]),
                                       note="Review the wording against the calculated findings. An explanation does "
                                            "not confirm a physical fault or certify pump safety."),
                 file_name="pump_detective_explanation.pdf", mime="application/pdf", key="explain_download",
