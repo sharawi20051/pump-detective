@@ -461,7 +461,7 @@ def request_ai_explanation(snapshot, question, api_key, model):
     return answer
 
 
-def request_gemini_explanation(snapshot, question, api_key, model):
+def request_gemini_explanation(snapshot, question, api_key, model, budget=55):
     """One bounded Gemini generateContent request (works on Google's free tier). No keys in errors."""
     if not api_key.strip() or not model.strip() or not question.strip():
         raise ValueError("An API key, model and question are required.")
@@ -494,7 +494,6 @@ def request_gemini_explanation(snapshot, question, api_key, model):
     # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the others in turn,
     # all within one time budget so nobody waits too long. Long answers (Arabic uses more tokens) need
     # time, so a model that is merely slow gets most of the budget instead of a short fixed timeout.
-    budget = 55
     models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()]
     started = time_module.monotonic()
     try:
@@ -578,7 +577,8 @@ def show_developer_reason(reason):
 def show_ai_markdown(text):
     """Show an AI answer: keep its line breaks, escape "$" (not LaTeX), right-to-left when Arabic."""
     text = re.sub(r"(?<!\n)\n(?!\n)", "  \n", text.replace("$", "\\$"))
-    if has_arabic(text):
+    letters = re.findall(r"[^\W\d_]", text)
+    if letters and sum(1 for c in letters if has_arabic(c)) > len(letters) / 2:  # mostly Arabic
         st.markdown(f'<div dir="rtl">\n\n{text}\n\n</div>', unsafe_allow_html=True)
     else:
         st.markdown(text)
@@ -596,15 +596,21 @@ def plain_for_pdf(text):
 
 def request_ai(snapshot, question, ai):
     """Send one question to whichever AI service the developer configured."""
-    if has_arabic(question):
-        # The snapshot is English, so models drift into English unless the language is stated plainly.
-        question += ("\n\n(Write the whole answer in Arabic. Keep numbers, units, dates and terms such as "
-                     "NPSH and Δp* exactly as given.)")
-    if ai.get("provider") == "Gemini":
-        answer = request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"])
-    else:
-        answer = request_ai_explanation(snapshot, question, ai["api_key"], ai["model"])
-    return tidy_ai_text(answer)
+    if ai.get("provider") != "Gemini":
+        return tidy_ai_text(request_ai_explanation(snapshot, question, ai["api_key"], ai["model"]))
+    if not has_arabic(question):
+        return tidy_ai_text(request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"]))
+    # Arabic needs 2-3x more output, and Google's free tier often refuses such long jobs under load (HTTP 503).
+    # Ask for a short Arabic answer first; if that fails, an AI answer in English beats the rule-based one.
+    arabic = question + ("\n\n(Write the whole answer in Arabic, in at most 120 words. Keep numbers, units, dates "
+                         "and terms such as NPSH and Δp* exactly as given.)")
+    try:
+        return tidy_ai_text(request_gemini_explanation(snapshot, arabic, ai["api_key"], ai["model"], budget=30))
+    except RuntimeError as exc:
+        print(f"AI fallback (Arabic answer, trying English): {exc}", flush=True)
+    answer = request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"], budget=30)
+    return ("تعذّر إنشاء الإجابة بالعربية الآن بسبب ضغط على خدمة الذكاء الاصطناعي؛ هذه الإجابة بالإنجليزية.\n\n"
+            + tidy_ai_text(answer))
 
 
 def offline_explanation(snapshot, topic):
