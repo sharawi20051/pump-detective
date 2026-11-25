@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 from reportlab.graphics.charts.lineplots import LinePlot
 from reportlab.graphics.shapes import Drawing, Line, String
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -21,7 +21,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle)
 
-import arabic
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 NAVY, BLUE, TEAL = colors.HexColor("#0A2540"), colors.HexColor("#0B5CAD"), colors.HexColor("#0E9384")
@@ -72,17 +71,11 @@ TEXT_WIDTH = A4[0] - 30 * mm
 
 
 def _text(text, style):
-    """Multi-line text as flowables. Lines containing Arabic are shaped, wrapped, put in right-to-left order
-    and right-aligned; other lines are ordinary paragraphs."""
-    rtl = ParagraphStyle(style.name + "-rtl", parent=style, alignment=TA_RIGHT)
-    measure = lambda t: pdfmetrics.stringWidth(t, style.fontName, style.fontSize)  # noqa: E731
+    """Multi-line text as flowables: one paragraph per line, blank lines as small gaps."""
     flowables = []
     for line in str(text).split("\n"):
         if not line.strip():
             flowables.append(Spacer(1, style.leading * 0.6))
-        elif arabic.has_arabic(line):
-            for row in arabic.wrap(line, TEXT_WIDTH - 24, measure):
-                flowables.append(Paragraph(escape(arabic.visual(row)), rtl))
         else:
             flowables.append(Paragraph(escape(line), style))
     return flowables

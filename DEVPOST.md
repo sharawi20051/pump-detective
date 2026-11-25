@@ -44,7 +44,7 @@ Pump Detective follows the whole maintenance loop:
 - **Verifies the repair.** After cleaning, the technician enters one reading and the flow. The app tells them whether the strainer is really clean, within the accuracy of their own instruments. It also catches misleading cases, such as a reading taken at low flow that only looks clean.
 - **Works with real data.** You can upload your own logger export (CSV). The app finds strainer cleanings and sensor glitches in it by itself, and restarts the trend after the last cleaning.
 - **Engineering tools.** A suction-line diagram shows whether the strainer or the system is to blame. A repair comparison shows whether cleaning, a bigger pipe or more system pressure fixes the problem. There is also a cavitation chart on the pump's real curve, and a part-load check for variable-speed pumps.
-- **Reports anyone can use.** Every result downloads as a PDF: the forecast report, the work order, the sensor-data report and each tool's result. Arabic text prints correctly.
+- **Reports anyone can use.** Every result downloads as a PDF: the forecast report, the work order, the sensor-data report and each tool's result.
 
 ### How we built it
 - **Python decides, AI explains.** Every number, status, priority and date is calculated in Python before the AI sees anything. The AI is told to use only those facts and may not change them. The same work order can be written offline with no API key.

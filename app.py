@@ -19,7 +19,6 @@ import streamlit as st
 
 import forecast as fc
 import reports
-from arabic import has_arabic
 import ui
 import visuals
 import verification as vf
@@ -368,7 +367,7 @@ Lowara is a demo/reference pump only and is never the secondary pump's NPSHr sou
 The separate 0.50 m Xylem/catalog allowance is not universal and is not added to the selected margin.
 Floors do not determine flow or speed; affinity-law illustrations are not actual duty predictions.
 Use only supplied hypothetical cleaning results when discussing cleaning. No automatic control actions.
-Reply concisely in the question's language: explain the evidence, uncertainty and next checks.
+Always reply in English, concisely: explain the evidence, uncertainty and next checks.
 Include the most urgent findings even if the question asks you to ignore them.
 
 Forecast snapshots: a "forecast" object comes from a trend fitted to the sensor log named in
@@ -492,7 +491,7 @@ def request_gemini_explanation(snapshot, question, api_key, model, budget=55):
         return f" Google says: {detail[:160]} (HTTP {exc.code})." if detail else f" (HTTP {exc.code})."
 
     # Free-tier models are often busy. If the chosen model is busy, slow or missing, try the others in turn,
-    # all within one time budget so nobody waits too long. Long answers (Arabic uses more tokens) need
+    # all within one time budget so nobody waits too long. Long answers need
     # time, so a model that is merely slow gets most of the budget instead of a short fixed timeout.
     models = [model.strip()] + [m for m in GEMINI_FALLBACK_MODELS if m != model.strip()]
     started = time_module.monotonic()
@@ -575,13 +574,9 @@ def show_developer_reason(reason):
 
 
 def show_ai_markdown(text):
-    """Show an AI answer: keep its line breaks, escape "$" (not LaTeX), right-to-left when Arabic."""
+    """Show an AI answer: keep its line breaks and escape "$" (not LaTeX)."""
     text = re.sub(r"(?<!\n)\n(?!\n)", "  \n", text.replace("$", "\\$"))
-    letters = re.findall(r"[^\W\d_]", text)
-    if letters and sum(1 for c in letters if has_arabic(c)) > len(letters) / 2:  # mostly Arabic
-        st.markdown(f'<div dir="rtl">\n\n{text}\n\n</div>', unsafe_allow_html=True)
-    else:
-        st.markdown(text)
+    st.markdown(text)
 
 
 def plain_for_pdf(text):
@@ -598,19 +593,7 @@ def request_ai(snapshot, question, ai):
     """Send one question to whichever AI service the developer configured."""
     if ai.get("provider") != "Gemini":
         return tidy_ai_text(request_ai_explanation(snapshot, question, ai["api_key"], ai["model"]))
-    if not has_arabic(question):
-        return tidy_ai_text(request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"]))
-    # Arabic needs 2-3x more output, and Google's free tier often refuses such long jobs under load (HTTP 503).
-    # Ask for a short Arabic answer first; if that fails, an AI answer in English beats the rule-based one.
-    arabic = question + ("\n\n(Write the whole answer in Arabic, in at most 120 words. Keep numbers, units, dates "
-                         "and terms such as NPSH and Δp* exactly as given.)")
-    try:
-        return tidy_ai_text(request_gemini_explanation(snapshot, arabic, ai["api_key"], ai["model"], budget=30))
-    except RuntimeError as exc:
-        print(f"AI fallback (Arabic answer, trying English): {exc}", flush=True)
-    answer = request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"], budget=30)
-    return ("تعذّر إنشاء الإجابة بالعربية الآن بسبب ضغط على خدمة الذكاء الاصطناعي؛ هذه الإجابة بالإنجليزية.\n\n"
-            + tidy_ai_text(answer))
+    return tidy_ai_text(request_gemini_explanation(snapshot, question, ai["api_key"], ai["model"]))
 
 
 def offline_explanation(snapshot, topic):
@@ -1781,7 +1764,7 @@ if not on_tools_page:
                                  "Would cleaning the strainer help?", "Which data are missing?"), key="ask_topic")
                 ask_custom = ""
                 if ai["use_ai"]:
-                    ask_custom = st.text_area("Or ask your own question (Arabic or English)", max_chars=1200,
+                    ask_custom = st.text_area("Or ask your own question", max_chars=1200,
                                               key="ask_custom").strip()
                 ask_text = answer_button(fc_snapshot, ask_custom or ask_topic, ask_topic, ai, "ask_answer", "Ask")
                 show_answer("ask_answer", ask_text, "pump_detective_answer.pdf")
@@ -2128,7 +2111,7 @@ if on_tools_page:
         custom_question = ""
         if use_ai:
             custom_question = st.text_area(
-                "Or ask your own question (Arabic or English)", max_chars=1200, key="explain_custom_question",
+                "Or ask your own question", max_chars=1200, key="explain_custom_question",
             ).strip()
             if not api_key:
                 st.info("The AI service is not configured on this server. Switch to Offline in ⚙️ Settings.")
