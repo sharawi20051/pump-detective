@@ -569,6 +569,12 @@ def tidy_ai_text(text):
     return re.sub(r"\b(\d) (\d{3}-\d{2}-\d{2})\b", r"\1\2", text)  # "2 026-12-13" -> "2026-12-13"
 
 
+def show_developer_reason(reason):
+    """The exact AI error, only when the page is opened with ?debug=1 (for the developer, not users)."""
+    if reason and st.query_params.get("debug") == "1":
+        st.caption(f"Developer detail: {reason}")
+
+
 def show_ai_markdown(text):
     """Show an AI answer: keep its line breaks, escape "$" (not LaTeX), right-to-left when Arabic."""
     text = re.sub(r"(?<!\n)\n(?!\n)", "  \n", text.replace("$", "\\$"))
@@ -754,7 +760,7 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
                 # Never leave the user without an answer: the rule-based writer uses the same calculations.
                 offline = generate_answer(snapshot, question, topic, {**ai, "use_ai": False})
                 st.session_state[state_key] = {"fingerprint": fingerprint, "answer": offline, "mode": AI_OFFLINE,
-                                               "question": question, "note": AI_BUSY_NOTE}
+                                               "question": question, "note": AI_BUSY_NOTE, "reason": str(exc)}
     return snapshot_text
 
 
@@ -765,6 +771,7 @@ def show_answer(state_key, snapshot_text, file_name):
     with st.container(border=True):
         if saved.get("note"):
             st.info(saved["note"])
+            show_developer_reason(saved.get("reason"))
         st.caption(f"{saved['mode']} · {saved['question']}")
         if saved["mode"] == AI_ONLINE:
             # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
@@ -2130,13 +2137,14 @@ if on_tools_page:
             # Remove the previous answer first, including when a new request fails.
             st.session_state.pop("explain_result", None)
             try:
-                busy_note = None
+                busy_note = reason = None
                 if use_ai:
                     try:
                         with st.spinner("Explaining the selected snapshot…"):
                             answer = request_ai(explanation_snapshot, question, ai)
                     except RuntimeError as exc:
                         print(f"AI fallback ({ai.get('provider')}, {ai.get('model')}): {exc}", flush=True)
+                        reason = str(exc)
                         answer = (offline_work_order(explanation_snapshot) if topic == MAINTENANCE_TOPIC
                                   else offline_explanation(explanation_snapshot, topic))
                         busy_note = AI_BUSY_NOTE
@@ -2147,6 +2155,7 @@ if on_tools_page:
                 st.session_state["explain_result"] = {
                     "fingerprint": fingerprint, "answer": answer,
                     "mode": AI_OFFLINE if busy_note else mode, "question": question, "note": busy_note,
+                    "reason": reason,
                 }
             except (RuntimeError, ValueError) as exc:
                 st.error(str(exc))
@@ -2155,6 +2164,7 @@ if on_tools_page:
         if saved and saved["fingerprint"] == fingerprint:
             if saved.get("note"):
                 st.info(saved["note"])
+                show_developer_reason(saved.get("reason"))
             st.caption(f"{saved['mode']} · {saved['question']}")
             if saved["mode"] != AI_OFFLINE:
                 # Render the model's markdown; escape "$" so amounts are not read as LaTeX.
