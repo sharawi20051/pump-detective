@@ -919,11 +919,11 @@ else:
     AI_PROVIDER, AI_KEY, AI_MODEL = None, "", ""
 AI_ONLINE = f"AI · {AI_PROVIDER}" if AI_PROVIDER else "AI"
 
-st.set_page_config(page_title="Pump Detective", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Pump Detective", page_icon=ui.ICON_PATH, layout="wide")
 ui.apply_style()
+st.logo(ui.LOGO_PATH, size="large", icon_image=ui.ICON_PATH)
 page_top = st.container()  # header and status row; filled once the page's results are known
 with st.sidebar:
-    st.markdown("### 🔍 Pump Detective")
     page = st.radio("Page", (FORECAST_PAGE, TOOLS_PAGE), key="page", label_visibility="collapsed")
     on_tools_page = page == TOOLS_PAGE
 sensor_box = st.sidebar.container()  # forecast inputs are placed here by the forecast page
@@ -1350,12 +1350,16 @@ if not on_tools_page:
             st.success("✓ **Cleaning verified: strainer restored.** The dates below come from the readings before "
                        "the cleaning; the forecast restarts as new readings arrive. Keep trending.")
         # Recommendation: the earliest (fast-rate) crossing of the maintenance limit or NPSH WARNING.
-        fc_candidates = [(row["days_earliest"], row["threshold"]) for row, (_, limit) in zip(fc_limit_rows[:2], fc_limits[:2])
+        fc_candidates = [(row["days_earliest"], row["threshold"], limit)
+                         for row, (_, limit) in zip(fc_limit_rows[:2], fc_limits[:2])
                          if limit > 0 and row["days_earliest"] is not None]
         fc_restores = fc_warn_dp > 0
+        fc_marker = None  # (date, Δp*) of the recommended complete-by point, labelled on the chart
         if fc_candidates:
-            fc_first_days, fc_first_name = min(fc_candidates)
+            fc_first_days, fc_first_name, fc_first_limit = min(fc_candidates)
             fc_due = fc_day_to_date(fc_last_day + fc_first_days)
+            if 0 < fc_first_days and fc_restores and not fc_cleaned:
+                fc_marker = (fc_due, fc_first_limit)
             fc_priority = "URGENT" if fc_first_days == 0 else "HIGH" if fc_first_days <= 14 else "PLANNED"
             fc_reco = {
                 "action": "Clean and inspect the suction strainer now" if fc_first_days == 0
@@ -1446,6 +1450,19 @@ if not on_tools_page:
         today_layer = alt.Chart(pd.DataFrame({"time": [datetime.combine(fc_today, time(23, 59))]})).mark_rule(
             color="#444", strokeDash=[2, 2]).encode(x="time:T")
         fc_layers = [raw_layer, band_layer, daily_layer, fit_layer, rule_layer, today_layer]
+        if fc_marker and fc_marker[0] <= fc_day_to_date(fc_last_day + fc_horizon):
+            # The answer in one glance: where the earliest forecast reaches the limit that drives the cleaning.
+            mark_df = pd.DataFrame({"time": [datetime.combine(fc_marker[0], time(12))], "y": [fc_marker[1]],
+                                    "label": [f"Clean by {fc_marker[0]:%d %b}"]})
+            mark_base = alt.Chart(mark_df).encode(x="time:T", y=alt.Y("y:Q", scale=y_scale))
+            fc_layers += [
+                mark_base.mark_point(shape="diamond", size=160, filled=True, color="#B54708", stroke="white",
+                                     strokeWidth=1.5, opacity=1).encode(
+                    tooltip=[alt.Tooltip("label:N", title="Recommendation"),
+                             alt.Tooltip("y:Q", title="Limit Δp* (kPa)", format=".1f")]),
+                mark_base.mark_text(align="right", baseline="bottom", dx=-10, dy=-8, fontSize=13,
+                                    fontWeight="bold", color="#B54708").encode(text="label:N"),
+            ]
         if len(fc_spikes):
             spike_df = fc_hourly.iloc[fc_spikes][["time", "Normalised Δp* (kPa)"]]
             fc_layers.append(alt.Chart(spike_df).mark_point(shape="cross", size=90, color="#c62828", filled=True).encode(

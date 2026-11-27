@@ -5,9 +5,17 @@ HTML/CSS rendered with st.markdown; any text that can come from a user (an uploa
 file name, for example) is escaped before it is placed in HTML.
 """
 
+import base64
+import os
 from html import escape
 
 import streamlit as st
+
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+ICON_PATH = os.path.join(ASSETS, "icon.png")       # drawn by scripts/make_logo.py
+LOGO_PATH = os.path.join(ASSETS, "logo_wide.png")
+with open(ICON_PATH, "rb") as _f:
+    ICON_URI = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
 
 NAVY, BLUE, TEAL = "#0A2540", "#0B5CAD", "#0E9384"
 STATUS_COLOURS = {
@@ -19,6 +27,11 @@ STATUS_COLOURS = {
 
 CSS = f"""
 <style>
+/* Hide Streamlit's own chrome: the top strip blends into the page; the sidebar toggle stays usable. */
+header[data-testid="stHeader"] {{background: transparent; box-shadow: none;}}
+div[data-testid="stDecoration"], div[data-testid="stStatusWidget"], div[data-testid="stToolbarActions"],
+span[data-testid="stMainMenu"], #MainMenu, footer {{display: none !important;}}
+
 .block-container {{max-width: 1180px; padding-top: 1.6rem; padding-bottom: 4rem;}}
 h1, h2, h3 {{color: {NAVY}; letter-spacing: -0.01em;}}
 h3 {{font-size: 1.15rem !important; margin-top: 0.6rem;}}
@@ -30,6 +43,8 @@ h3 {{font-size: 1.15rem !important; margin-top: 0.6rem;}}
 .pd-hero-top {{display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;}}
 .pd-brand {{font-size: 1.75rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1;}}
 .pd-brand span {{opacity: 0.75; font-weight: 600;}}
+.pd-logo {{width: 1.6em; height: 1.6em; border-radius: 0.38em; vertical-align: -0.42em; margin-right: 10px;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.35);}}
 .pd-tagline {{margin-top: 6px; font-size: 0.98rem; opacity: 0.92; max-width: 640px;}}
 .pd-asset {{margin-top: 10px; font-size: 0.82rem; opacity: 0.8;}}
 .pd-badge {{display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 700;
@@ -93,7 +108,7 @@ def header(data_label, data_detail):
     badge = "Uploaded log" if upload else "Synthetic demo data"
     st.markdown(
         f"""<div class="pd-hero"><div class="pd-hero-top"><div>
-<div class="pd-brand">🔍 Pump Detective <span>· predictive strainer care</span></div>
+<div class="pd-brand"><img class="pd-logo" src="{ICON_URI}" alt="">Pump Detective <span>· predictive strainer care</span></div>
 <div class="pd-tagline">Predicts when a clogging suction strainer will cost a chilled-water pump its NPSH margin,
 schedules the cleaning, writes the work order and verifies the result.</div>
 <div class="pd-asset">CHWPP-01 primary chilled-water pump · Lowara NSC 80-200 reference curve · {escape(str(data_detail))}</div>

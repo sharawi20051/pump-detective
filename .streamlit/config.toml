@@ -5,7 +5,7 @@ primaryColor = "#0B5CAD"
 backgroundColor = "#F5F7FA"
 secondaryBackgroundColor = "#E8EEF5"
 textColor = "#1F2A37"
-font = "sans serif"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap, sans-serif"
 
 [client]
 toolbarMode = "minimal"
