@@ -14,7 +14,7 @@ Predicts when a clogging strainer will make a chilled-water pump cavitate, sched
 AI, Agentic Systems, Cybersecurity, and Dev Tools
 
 ## Built with (tags)
-python, streamlit, altair, numpy, pandas, reportlab, openai-api, github-actions, streamlit-community-cloud
+python, streamlit, altair, numpy, pandas, reportlab, gemini-api, openai-api, github-actions, streamlit-community-cloud
 
 ## Try it out (links)
 - Live app: https://pump-detective.streamlit.app/
@@ -28,9 +28,11 @@ python, streamlit, altair, numpy, pandas, reportlab, openai-api, github-actions,
 ## About the project (main story)
 
 ### Inspiration
-Every large building is cooled by chilled-water pumps, and in front of each pump sits a strainer that catches debris. As the strainer slowly clogs, the pressure at the pump inlet drops. Below a certain point the water starts to boil inside the pump. That is **cavitation**: it eats the impeller, causes noise and vibration, and ends in an expensive repair and downtime.
+In a hospital, a data centre or an office tower, chilled water is what keeps the building cool, and losing it is expensive. After power, cooling problems are the most common cause of serious data-centre outages, and in Uptime Institute's 2025 survey 57% of operators said their most recent major outage cost more than **$100,000**; one in five said more than **$1 million**.
 
-Today, strainers are usually cleaned on a fixed calendar or after something goes wrong. The data to do better already exists, because most plants log flow and pressure, but nobody turns it into the question a technician actually needs answered: **"When do I have to clean this, and did my cleaning work?"**
+One quiet way a chilled-water pump fails is a clogging suction strainer. As debris builds up, the pressure at the pump inlet drops. Below a certain point the water starts to boil inside the pump. That is **cavitation**: vapour bubbles collapse against the impeller, pit the metal and shake the bearings and seals. One pump specialist reports a stainless-steel impeller destroyed by cavitation in as little as **three months**. Usually nobody notices until the damage is done.
+
+Reliability engineers recommend setting the cleaning interval from the trend in the strainer's pressure drop, with a trigger set before the pump suffers. In practice, strainers are usually cleaned on a fixed calendar or after something goes wrong. The data to do better already exists, because most plants log flow and pressure, but nobody turns it into the question a technician actually needs answered: **"When do I have to clean this, and did my cleaning work?"**
 
 ### What it does
 Pump Detective follows the whole maintenance loop:
@@ -87,13 +89,19 @@ Pump Detective follows the whole maintenance loop:
 ### Honest limitations
 All demo data are synthetic. The pump curve is a published reference curve read from the catalogue, not a specific installed pump. Nothing has been validated with field measurements yet. The app is a maintenance-planning aid, not a safety certification.
 
+### Sources
+- Uptime Institute, *Annual Outage Analysis 2026* (outage costs): https://intelligence.uptimeinstitute.com/resource/annual-outage-analysis-2026
+- Computer Weekly on Uptime Institute Intelligence data (cooling is the most common outage cause after power): https://www.computerweekly.com/news/366623669/Datacentre-outages-decreasing-in-frequency-Uptime-Institute-Intelligence-data-shows
+- Allan R. Budris, "Understanding Pump Cavitation and Its Impact on Pump Reliability", WaterWorld (impeller destroyed in three months): https://www.waterworld.com/wastewater-treatment/article/16193748/understanding-pump-cavitation-and-its-impact-on-pump-reliability
+- Reliability Magazine (set strainer cleaning from the pressure-drop trend): https://reliamag.com/cartoons/pump-cavitation-is-a-symptom-and-youre-treating-it-like-the-disease/
+
 ---
 
 ## Team
 <add every team member's name and Devpost profile>
 
 ## Tools used (including AI tools)
-Python, Streamlit, Altair, numpy, pandas, reportlab, GitHub Actions, Streamlit Community Cloud, OpenAI API (optional AI work orders). ChatGPT and Claude assisted with code, review and documentation.
+Python, Streamlit, Altair, numpy, pandas, reportlab, GitHub Actions, Streamlit Community Cloud, Google Gemini API (AI work orders and explanations; OpenAI also supported). ChatGPT and Claude assisted with code, review and documentation.
 
 ## Screenshots (suggested captions)
 1. **One screen, the whole answer:** pump status, the next action, the clean-by date and the forecast's own accuracy.
