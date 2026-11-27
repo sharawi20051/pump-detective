@@ -757,11 +757,14 @@ def answer_button(snapshot, question, topic, ai, state_key, label, slot=None, pr
     return snapshot_text
 
 
-def show_answer(state_key, snapshot_text, file_name):
+def show_answer(state_key, snapshot_text, file_name, closed=False):
+    """Show a saved answer. ``closed``: the work order predates a verified cleaning, so it is folded away."""
     saved = st.session_state.get(state_key)
     if not saved:
         return
-    with st.container(border=True):
+    box = (st.expander("📋 Work order issued before the cleaning: closed by the verification below")
+           if closed else st.container(border=True))
+    with box:
         if saved.get("note"):
             st.info(saved["note"])
             show_developer_reason(saved.get("reason"))
@@ -1627,8 +1630,11 @@ if not on_tools_page:
             st.write(f"**Next:** {v_res.next_check}")
             if v_suction < ATMOSPHERIC_KPA_ABS:
                 st.info(
-                    f"Suction at design flow would be {v_suction:.1f} kPa abs, below atmospheric. Strainer cleaning alone "
-                    "cannot fix the loop's low system pressure: check fill pressure and the expansion tank."
+                    (f"The NPSH margin is met, but suction at design flow would be {v_suction:.1f} kPa abs, below "
+                     "atmospheric. That is unusual for a closed chilled-water loop: check fill pressure and the "
+                     "expansion tank." if v_status == "SAFE" else
+                     f"Suction at design flow would be {v_suction:.1f} kPa abs, below atmospheric. Strainer cleaning "
+                     "alone cannot fix the loop's low system pressure: check fill pressure and the expansion tank.")
                 )
             verification_summary = {
                 "strainer_verdict": v_res.verdict,
@@ -1771,7 +1777,7 @@ if not on_tools_page:
                            width="stretch",
                            help="Status, recommendation, chart, forecast table, evidence and, once created, the work order.")
     with p_answer:
-        show_answer("work_order", fc_snapshot_text, "pump_detective_work_order.pdf")
+        show_answer("work_order", fc_snapshot_text, "pump_detective_work_order.pdf", closed=fc_cleaned)
     with p_more:
         with st.expander("🔎 Why? The evidence behind this recommendation"):
             for item in fc_findings:
