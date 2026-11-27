@@ -5,3 +5,6 @@ venv/
 .streamlit/secrets.toml
 Pump_Detective_Review.pdf
 .env
+
+# Demo video renders (upload to YouTube, not git)
+demo_video/

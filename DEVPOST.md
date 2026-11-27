@@ -103,6 +103,8 @@ All demo data are synthetic. The pump curve is a published reference curve read 
 ## Tools used (including AI tools)
 Python, Streamlit, Altair, numpy, pandas, reportlab, GitHub Actions, Streamlit Community Cloud, Google Gemini API (AI work orders and explanations; OpenAI also supported). ChatGPT and Claude assisted with code, review and documentation.
 
+Demo video: screen-recorded from the live app with a Playwright script (built with Claude Code); narration by Microsoft Edge text-to-speech, not the team's own voice. Everything shown on screen is the real app running live.
+
 ## Screenshots (suggested captions)
 1. **One screen, the whole answer:** pump status, the next action, the clean-by date and the forecast's own accuracy.
 2. **Is it the strainer or the system?** The suction-line diagram changes colour with the readings, then the repair options are compared.
