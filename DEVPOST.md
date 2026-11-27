@@ -98,7 +98,7 @@ All demo data are synthetic. The pump curve is a published reference curve read 
 ---
 
 ## Team
-<add every team member's name and Devpost profile>
+- **Abedahfiz Sharawi**: https://devpost.com/sharawi20051
 
 ## Tools used (including AI tools)
 Python, Streamlit, Altair, numpy, pandas, reportlab, GitHub Actions, Streamlit Community Cloud, Google Gemini API (AI work orders and explanations; OpenAI also supported). ChatGPT and Claude assisted with code, review and documentation.
