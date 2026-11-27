@@ -63,7 +63,7 @@ Pump Detective follows the whole maintenance loop:
 - **Interface and delivery.**
   - Streamlit and Altair for the app, with a custom design, SVG diagrams and PDF reports built with reportlab.
   - Deployed on Streamlit Community Cloud, with a GitHub Action that keeps the demo awake for judges.
-  - 74 automated tests cover the physics (checked against hand calculations), the forecast and backtest, CSV upload, verification and the PDFs.
+  - 70 automated tests cover the physics (checked against hand calculations), the forecast and backtest, CSV upload, verification and the PDFs.
 
 ### Challenges we ran into
 - **Making the forecast trustworthy, not just good-looking.** The first version fitted a trend to data generated with that same trend shape. We added a backtest and a deliberately mismatched scenario to show how the method behaves when its own assumption is wrong.

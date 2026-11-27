@@ -30,6 +30,6 @@ Cuts if you run long: shorten the 0:30–1:05 chart explanation first. If you ha
 
 ## Devpost checklist
 
-Public GitHub link, deployed app link, embeddable YouTube or Vimeo video, track, every team member, tools used including AI tools (ChatGPT, Claude Code, OpenAI API), and 3 screenshots (forecast chart, work order, RESTORED verdict).
+Public GitHub link, deployed app link, embeddable YouTube or Vimeo video, track, every team member, tools used including AI tools (ChatGPT, Claude Code, Google Gemini API), and 3 screenshots (forecast chart, work order, RESTORED verdict).
 
 [GenHacks submission requirements](https://genhacks-open.devpost.com/#requirements)

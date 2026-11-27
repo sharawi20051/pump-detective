@@ -30,7 +30,7 @@ Statistical forecast (trend, anomalies, time to limit)               forecast.py
         ↓
 Maintenance decision (priority, clean-by date, verification verdict) app.py, verification.py
         ↓
-AI explanation / work order (optional; offline fallback)             app.py (OpenAI Responses API)
+AI explanation / work order (optional; offline fallback)             app.py (Google Gemini or OpenAI)
 ```
 
 Every number, status, priority and date is computed in Python before the AI sees it. The AI is instructed not to change or invent any of them. Offline mode produces the same work order with no API key.
@@ -127,7 +127,7 @@ Click **📋 Create work order** in the recommendation box to get a work order: 
 
 ## Limitations
 
-- All sensor data are synthetic. The pump curve is a published reference read by eye, not the installed pump's.
+- All demo sensor data are synthetic, and an uploaded log is the user's own data, not checked by the app. The pump curve is a published reference read by eye, not the installed pump's.
 - The demo plant is a **low-pressure rooftop plant** (33 kPa abs before the strainer), so suction is below atmospheric. With this pump's low NPSHr, strainer fouling only threatens the NPSH margin at such low pressures; the app flags the low suction separately.
 - The forecast range reflects uncertainty in the fouling **rate** only. Real fouling can accelerate or stop; re-run the forecast as data arrive.
 - The backtest scores the method on the same synthetic log. It shows the method behaves sensibly, not how accurate it would be in the field.
@@ -149,7 +149,7 @@ py -m streamlit run app.py
 
 ## Tests
 
-67 unit tests cover the NPSH physics (checked against hand calculations and the demo values), the forecast and its backtest, CSV upload (format, cleanings, rejected files, round trip), flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
+70 unit tests cover the NPSH physics (checked against hand calculations and the demo values), the forecast and its backtest, CSV upload (format, cleanings, rejected files, round trip), flow normalisation, anomaly detection, verification and its input validation, and the strainer diagnosis rule:
 
 ```bash
 py -m unittest discover tests
@@ -161,4 +161,4 @@ Live sensor ingestion (BMS / historian connection instead of CSV files), alerts,
 
 ## Tools
 
-Python (calculations and rules), numpy and pandas (trend analysis), Streamlit and Altair (interface and charts; custom theme in `.streamlit/config.toml`, `ui.py` and `visuals.py`), reportlab (PDF reports), OpenAI Responses API (optional explanations). ChatGPT and Claude Code assisted with code, review and documentation. `archive/` holds an earlier version for reference only.
+Python (calculations and rules), numpy and pandas (trend analysis), Streamlit and Altair (interface and charts; custom theme in `.streamlit/config.toml`, `ui.py` and `visuals.py`), reportlab (PDF reports), Google Gemini API or OpenAI Responses API (optional explanations; the live app uses Gemini). ChatGPT and Claude Code assisted with code, review and documentation. `archive/` holds an earlier version for reference only.

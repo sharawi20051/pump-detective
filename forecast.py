@@ -266,6 +266,10 @@ CSV_COLUMNS = {
     "dp_kpa": ("dp_kpa", "strainer_dp_kpa"),
 }
 MIN_UPLOAD_DAYS = 15  # 8 days to fit + 7 hidden for the shortest backtest
+# Below this, a pressure labelled absolute is more likely a gauge reading (a closed chilled-water loop at
+# 20 kPa abs would be in deep vacuum). The demo plant runs at 33 kPa abs, so it does not trigger.
+LOW_ABSOLUTE_KPA = 20.0
+WATER_VAPOUR_KPA_20C = 2.339
 
 
 def load_sensor_csv(source, q_ref_lps, min_days=MIN_UPLOAD_DAYS):
@@ -340,6 +344,16 @@ def load_sensor_csv(source, q_ref_lps, min_days=MIN_UPLOAD_DAYS):
                              "logger records gauge pressure, add the local atmospheric pressure (about 101.3 kPa).")
     if med_before is not None and med_before > 2000:
         notes.append(f"Pressure before the strainer is about {med_before:,.0f}: is it in Pa rather than kPa?")
+    # A positive gauge reading cannot be told apart from an absolute one, but very low values are a strong hint:
+    # the NPSH checks need absolute pressure, while the strainer Δp (a difference) is unaffected.
+    if med_before is not None and 0 < med_before < LOW_ABSOLUTE_KPA:
+        notes.append(f"Pressure before the strainer is about {med_before:.1f} kPa, unusually low for an absolute "
+                     "pressure. If the logger records gauge pressure, add the local atmospheric pressure (about "
+                     "101.3 kPa) to both pressure columns; otherwise the NPSH results will be wrong.")
+    med_suction = float(hourly["suction"].median()) if hourly["suction"].notna().any() else None
+    if med_suction is not None and med_suction <= WATER_VAPOUR_KPA_20C:
+        notes.append(f"Suction pressure is about {med_suction:.1f} kPa, at or below the vapour pressure of water: "
+                     "it cannot be an absolute pressure. Check for gauge readings or swapped units.")
     if med_dp > 100:
         notes.append(f"Strainer Δp is about {med_dp:.0f} kPa, very high for a strainer: check the units.")
     if med_flow > 2 * q_ref_lps:

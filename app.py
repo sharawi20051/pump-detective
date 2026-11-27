@@ -378,6 +378,10 @@ change the priority. Always state the data origin exactly as data_origin gives i
 uploaded and not verified against the plant), and that day ranges reflect fit
 uncertainty only. If cleaning_alone_restores_npsh_margin is false, say clearly that cleaning
 is not enough and upstream pressure must be restored.
+The complete-by date is the EARLIEST estimate, chosen so the work is done before the limit is
+reached. Never say the limit will be reached by that date; give the central estimate and the
+range in days as the forecast states them. Write true/false values as plain sentences (for
+example "cleaning alone restores the margin"), never as the words true or false.
 For a maintenance or scheduling question, answer as a short work order with these headings:
 Action, Priority, Complete by, Why (evidence), Also check, Confidence.
 Without a forecast object, do not give maintenance dates; say a trend forecast is needed.

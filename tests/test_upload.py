@@ -116,6 +116,14 @@ class WarningTests(unittest.TestCase):
         _, info = fc.load_sensor_csv(csv_text(flow_lps=0.2 * Q_REF), Q_REF)
         self.assertTrue(any("30 %" in w for w in info["warnings"]))
 
+    def test_gauge_pressure_warns(self):
+        # 105/99 kPa abs logged as gauge: 3.7 and -2.3 kPa. Still analysable (Δp unchanged), but flagged.
+        log, info = fc.load_sensor_csv(csv_text(pressure_before_kpa_abs=3.7, suction_kpa_abs=-2.3), Q_REF)
+        self.assertTrue(any("gauge" in w for w in info["warnings"]))
+        self.assertAlmostEqual(float(np.nanmedian(log["dp_kpa"])), 6.0)
+        _, normal = fc.load_sensor_csv(csv_text(), Q_REF)
+        self.assertFalse(any("gauge" in w for w in normal["warnings"]))
+
     def test_downloaded_synthetic_log_round_trips(self):
         # The app's download adds a timestamp column and keeps upstream_kpa_abs: it must load again.
         log = fc.generate_sensor_log("Debris slug")
