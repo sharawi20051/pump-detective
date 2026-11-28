@@ -355,6 +355,50 @@ def offline_work_order(snapshot):
     return "\n".join(lines)
 
 
+def work_order_header(snapshot):
+    """The decision lines of a work order (action, priority, date, driver), written by Python so no AI can
+    misstate them. The complete-by date is the earliest estimate; central estimate and range are given beside it."""
+    forecast = snapshot["forecast"]
+    reco = forecast["recommendation"]
+    action = reco["action"].rstrip(".") + "."
+    if reco["cleaning_alone_restores_npsh_margin"] and reco["priority"] != "NONE":
+        action += " Cleaning alone restores the NPSH margin."
+    days = reco["days_until_due_earliest"]
+    if not reco["complete_by"]:
+        when = "not required within 180 days; keep trending."
+    elif not days:
+        when = f"{reco['complete_by']} (now)."
+    else:
+        row = next((r for r in forecast["thresholds"] if r["threshold"] == reco["driver"]), None)
+        when = f"{reco['complete_by']} (earliest estimate, about {days:.0f} days away, so the work is done before the limit"
+        if row and row["days_central"] is not None:
+            late = "180+" if row["days_latest"] is None else f"{row['days_latest']:.0f}"
+            when += (f"; the limit is most likely reached in about {row['days_central']:.0f} days, "
+                     f"range {row['days_earliest']:.0f} to {late} days")
+        when += ")."
+    lines = [f"**Action:** {action}", f"**Priority:** {reco['priority']}", f"**Complete by:** {when}"]
+    if reco["driver"]:
+        lines.append(f"**Driver:** {reco['driver']}.")
+    lines.append("*The lines above are calculated by Pump Detective. The AI writes the explanation below from the "
+                 "same facts and cannot change them.*")
+    return "\n".join(lines)
+
+
+WORK_ORDER_AI_REQUEST = (
+    "The app has already written the Action, Priority, Complete by and Driver lines of this work order. "
+    "Write only the rest, with exactly these headings: Why (evidence), Also check, Confidence. "
+    "Do not repeat those lines, do not restate any date, and do not say when a limit will be reached."
+)
+
+
+def ai_work_order(snapshot, question, ai):
+    """Work order with AI: Python's decision lines first, then the AI's explanation."""
+    if not snapshot.get("forecast"):
+        return request_ai(snapshot, question, ai)
+    body = request_ai(snapshot, f"{question}\n\n{WORK_ORDER_AI_REQUEST}", ai)
+    return work_order_header(snapshot) + "\n\n" + body.strip()
+
+
 AI_EXPLANATION_INSTRUCTIONS = """You explain a Pump Detective educational diagnostic snapshot.
 The supplied snapshot and rule-based findings are authoritative for numbers and statuses.
 Explain them; do not change or override any calculation, status, reference or priority.
@@ -382,8 +426,9 @@ The complete-by date is the EARLIEST estimate, chosen so the work is done before
 reached. Never say the limit will be reached by that date; give the central estimate and the
 range in days as the forecast states them. Write true/false values as plain sentences (for
 example "cleaning alone restores the margin"), never as the words true or false.
-For a maintenance or scheduling question, answer as a short work order with these headings:
-Action, Priority, Complete by, Why (evidence), Also check, Confidence.
+For a maintenance or scheduling question, the app itself writes the Action, Priority, Complete by
+and Driver lines. Write only the headings Why (evidence), Also check and Confidence, and never
+restate the complete-by date or say when a limit will be reached.
 Without a forecast object, do not give maintenance dates; say a trend forecast is needed.
 If forecast.post_maintenance_verification is present, report its strainer_verdict, clean band
 and NPSH status exactly; never upgrade a verdict. RESTORED means the strainer reading is within
@@ -568,6 +613,7 @@ def tidy_ai_text(text):
         math = re.sub(r"\\[A-Za-z]+", "", math).replace("^", "").replace("{", "").replace("}", "")
         return re.sub(r"Δ\s+", "Δ", math).strip()
     text = re.sub(r"\$([^$\n]*\\[^$\n]*)\$", plain, text)
+    text = re.sub(r"\s*\((?:true|false)\)", "", text, flags=re.I)  # "restores the margin (true)" -> plain sentence
     return re.sub(r"\b(\d) (\d{3}-\d{2}-\d{2})\b", r"\1\2", text)  # "2 026-12-13" -> "2026-12-13"
 
 
@@ -710,7 +756,7 @@ def forecast_status_cards(summary):
 def generate_answer(snapshot, question, topic, ai):
     """Work order or explanation: OpenAI when selected, otherwise the deterministic offline writer."""
     if ai["use_ai"]:
-        return request_ai(snapshot, question, ai)
+        return ai_work_order(snapshot, question, ai) if topic == MAINTENANCE_TOPIC else request_ai(snapshot, question, ai)
     if topic == MAINTENANCE_TOPIC:
         return offline_work_order(snapshot)
     return offline_explanation(snapshot, topic)
@@ -2157,7 +2203,8 @@ if on_tools_page:
                 if use_ai:
                     try:
                         with st.spinner("Explaining the selected snapshot…"):
-                            answer = request_ai(explanation_snapshot, question, ai)
+                            answer = (ai_work_order(explanation_snapshot, question, ai) if topic == MAINTENANCE_TOPIC
+                                      else request_ai(explanation_snapshot, question, ai))
                     except RuntimeError as exc:
                         print(f"AI fallback ({ai.get('provider')}, {ai.get('model')}): {exc}", flush=True)
                         reason = str(exc)
