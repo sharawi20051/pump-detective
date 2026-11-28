@@ -635,7 +635,8 @@ def plain_for_pdf(text):
     for line in text.splitlines():
         line = re.sub(r"^\s*[*-]\s+", "• ", line)
         line = re.sub(r"^#+\s*", "", line)
-        lines.append(line.replace("**", "").replace("__", "").replace("`", ""))
+        line = line.replace("**", "").replace("__", "").replace("`", "")
+        lines.append(re.sub(r"(?<![\w*])\*(\S[^*]*?\S)\*(?![\w*])", r"\1", line))  # *italic* -> italic
     return "\n".join(lines)
 
 
@@ -1816,7 +1817,7 @@ if not on_tools_page:
                          for d in range(0, 61)],
             "limits": [("Cleaning limit", float(fc_maint_limit)), ("NPSH WARNING", float(fc_warn_dp)),
                        ("NPSH CRITICAL", float(fc_crit_dp))],
-            "work_order": fc_wo["answer"] if fc_wo else None,
+            "work_order": plain_for_pdf(fc_wo["answer"]) if fc_wo else None,
         }, sort_keys=True, default=str)
         b3.download_button("⬇ Download report (PDF)", data=forecast_report_pdf(fc_report_payload),
                            file_name="pump_detective_report.pdf", mime="application/pdf", key="report_download",
